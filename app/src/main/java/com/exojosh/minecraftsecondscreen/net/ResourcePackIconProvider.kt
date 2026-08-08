@@ -9,6 +9,8 @@ import java.io.IOException
 import java.io.InputStream
 import java.util.zip.ZipInputStream
 
+import com.exojosh.minecraftsecondscreen.settings.HudBackground
+
 private const val TAG = "ResourcePackIcons"
 
 /** Where vanilla resource packs store the individual HUD sprite PNGs as of the
@@ -175,9 +177,22 @@ class ResourcePackIconProvider(
     fun getFontSheet(): Bitmap? =
         repository?.assetCache?.get(HudIcon.FONT_ASCII) ?: loadAsset(FONT_SHEET_PATH)
 
-    /** The block texture tiled behind the HUD. */
+    /** The default block texture tiled behind the HUD — dirt, and the only one an
+     *  older mod build serves. */
     fun getBackground(): Bitmap? =
         repository?.assetCache?.get(HudIcon.BACKGROUND) ?: loadAsset(BACKGROUND_PATH)
+
+    /**
+     * The chosen backdrop texture, falling back to dirt.
+     *
+     * The fallback matters rather than being defensive boilerplate: the alternative
+     * backdrops postdate the original `background` key, so a mod build that predates
+     * them serves only dirt — and a player who had picked sand would otherwise get a
+     * blank screen after downgrading the mod half. Dirt is what they had before, so
+     * it's the right answer.
+     */
+    fun getBackground(background: HudBackground): Bitmap? =
+        repository?.assetCache?.get(background.assetKey) ?: getBackground()
 
     /** The paper sheet vanilla draws a held map on, used the same way behind
      *  the live map tile. Socket-only: it isn't under the hud/ sprite dir, so

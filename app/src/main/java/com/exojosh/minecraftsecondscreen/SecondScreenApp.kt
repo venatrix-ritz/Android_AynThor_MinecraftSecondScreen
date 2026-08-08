@@ -43,6 +43,7 @@ import com.exojosh.minecraftsecondscreen.ui.rememberMinecraftFont
 import com.exojosh.minecraftsecondscreen.ui.rememberMinecraftGuiTextures
 import com.exojosh.minecraftsecondscreen.settings.ContainerKind
 import com.exojosh.minecraftsecondscreen.settings.HudElement
+import com.exojosh.minecraftsecondscreen.settings.rememberBackgroundSettings
 import com.exojosh.minecraftsecondscreen.settings.rememberChatSettings
 import com.exojosh.minecraftsecondscreen.settings.rememberContainerSettings
 import com.exojosh.minecraftsecondscreen.settings.rememberHudSettings
@@ -123,6 +124,7 @@ fun SecondScreenApp(
     val inputSettings = rememberInputSettings()
     val chatSettings = rememberChatSettings()
     val containerSettings = rememberContainerSettings()
+    val backgroundSettings = rememberBackgroundSettings()
 
     // Which tabs apply right now. The Creative tab exists only in creative, and a
     // player switching back to survival must not be left sitting on it -- the
@@ -211,8 +213,9 @@ fun SecondScreenApp(
     // here too. This used to read the bundled copy directly while HudScreen
     // used the socket one, which meant a pack changed the HUD's background but
     // not the background behind it.
-    val dirtBitmap = remember(iconProvider.getBackground()) {
-        iconProvider.getBackground()?.asImageBitmap()
+    val backdropBitmap = remember(backgroundSettings.background,
+        iconProvider.getBackground(backgroundSettings.background)) {
+        iconProvider.getBackground(backgroundSettings.background)?.asImageBitmap()
     }
 
     // The game's GUI chrome — button states and the inventory slot — provided
@@ -323,6 +326,8 @@ fun SecondScreenApp(
                             inputSettings = inputSettings,
                             chatSettings = chatSettings,
                             containerSettings = containerSettings,
+                            backgroundSettings = backgroundSettings,
+                            iconProvider = iconProvider,
                             bindings = bindings,
                             onRequestBindings = hudRepository::requestBindings
                         )
@@ -393,9 +398,9 @@ fun SecondScreenApp(
     }
 
     CompositionLocalProvider(LocalMinecraftGui provides guiTextures) {
-        if (dirtBitmap != null) {
+        if (backdropBitmap != null) {
             RepeatingTextureBackground(
-                texture = dirtBitmap,
+                texture = backdropBitmap,
                 scaleFactor = 16f,
                 modifier = Modifier.fillMaxSize(),
                 content = content

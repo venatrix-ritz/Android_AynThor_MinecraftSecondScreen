@@ -81,6 +81,12 @@ for _brew in ("fuel_length", "brew_progress", "bubbles"):
 ASSETS["container_crafter_disabled_slot"] = (
     "textures/gui/sprites/container/crafter/disabled_slot.png")
 
+# Alternative backdrops. Dirt keeps the plain "background" key it always had, so
+# the default costs no second copy of the same PNG.
+for _block in ("stone", "cobblestone", "mossy_cobblestone", "stone_bricks",
+               "bricks", "sand", "oak_planks", "dark_oak_planks"):
+    ASSETS[f"background_{_block}"] = f"textures/block/{_block}.png"
+
 # The beacon's effect icons. Under textures/mob_effect/, not gui/sprites/, so they
 # get their own key prefix -- the app derives it from the effect's registry id.
 for _effect in ("speed", "haste", "resistance", "jump_boost", "strength",
