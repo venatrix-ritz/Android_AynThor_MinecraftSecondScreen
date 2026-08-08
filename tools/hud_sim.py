@@ -81,6 +81,12 @@ for _brew in ("fuel_length", "brew_progress", "bubbles"):
 ASSETS["container_crafter_disabled_slot"] = (
     "textures/gui/sprites/container/crafter/disabled_slot.png")
 
+# The beacon's effect icons. Under textures/mob_effect/, not gui/sprites/, so they
+# get their own key prefix -- the app derives it from the effect's registry id.
+for _effect in ("speed", "haste", "resistance", "jump_boost", "strength",
+                "regeneration"):
+    ASSETS[f"mob_effect_{_effect}"] = f"textures/mob_effect/{_effect}.png"
+
 
 def slot(item_id, count=1, damage=0, max_damage=0, glint=False):
     return {

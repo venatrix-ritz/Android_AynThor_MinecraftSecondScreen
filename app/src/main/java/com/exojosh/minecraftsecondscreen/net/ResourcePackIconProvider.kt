@@ -206,6 +206,23 @@ class ResourcePackIconProvider(
         return repository?.assetCache?.get(path.replace('/', '_'))
     }
 
+    /**
+     * A status effect's icon by its registry id, e.g. `minecraft:haste`.
+     *
+     * The beacon's picker used to label its buttons with effect *names*, which on
+     * a screen this size read as a wall of words where the game shows a row of
+     * recognisable icons. These are the game's own `textures/mob_effect/` sprites.
+     *
+     * Only the six a beacon can offer are served (see `HudAssetCatalog`), so an
+     * effect outside that set — a datapack adding one — resolves to null and the
+     * caller falls back to the name. Same graceful degradation as every other
+     * texture here.
+     */
+    fun getStatusEffectIcon(effectId: String?): Bitmap? {
+        if (effectId == null) return null
+        return repository?.assetCache?.get("mob_effect_" + effectId.substringAfter(':'))
+    }
+
     private fun loadIconFromAssets(icon: HudIcon): Bitmap? {
         Log.d(TAG, "Test, calling loadIconFromAssets")
         for (candidate in icon.candidateNames) {

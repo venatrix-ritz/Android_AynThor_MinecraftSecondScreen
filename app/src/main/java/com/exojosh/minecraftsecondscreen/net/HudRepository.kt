@@ -305,6 +305,20 @@ data class ContainerExtras(
     val isEmpty: Boolean
         get() = enchanting == null && stonecutter == null && loom == null &&
             merchant == null && beacon == null && anvil == null
+
+    /**
+     * Whether these controls want a narrow rail down the right rather than a band
+     * across the top.
+     *
+     * Only the villager does, and it's a shape argument rather than a preference.
+     * Every other container's choice is a *row* of things — recipes, patterns,
+     * effects, three offers — which reads naturally as a horizontal strip. A trade
+     * is itself three stacks laid out left to right, so a list of trades is a list
+     * of rows, and rows stack downwards. Turned sideways each trade became a wide
+     * card and only three or four fitted on screen at once; stacked in a rail they
+     * all fit, and the rail only has to be as wide as one trade.
+     */
+    val prefersSideRail: Boolean get() = merchant != null
 }
 
 data class ContainerState(

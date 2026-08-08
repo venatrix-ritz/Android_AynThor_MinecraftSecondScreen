@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,6 +50,17 @@ private val SCREEN_PADDING = 4.dp
 /** Clearance between the panel's bevel and the controls inside it. */
 private val PANEL_INSET = 6.dp
 private val CONTROL_BAR_HEIGHT = 40.dp
+
+/**
+ * Width of the villager's trade rail — the one container whose controls sit beside
+ * the grid rather than above it.
+ *
+ * A fixed width, not a weight, and deliberately mean with it: one trade is three
+ * 26dp stacks plus a separator, so this is about as narrow as the content can be.
+ * A weight would have taken a *share* of the width, which is what made the old
+ * side-by-side layout cost the grid so much.
+ */
+private val SIDE_RAIL_WIDTH = 124.dp
 
 
 private val SLOT_BLOCKED = Color(0x55FF4444)
@@ -181,13 +193,23 @@ fun InventoryScreen(
             // lists had far more room than they needed. The band takes only the
             // height its content wants, so the cost is paid in the dimension
             // that has some to spare.
-            state.extras?.let { extras ->
+            //
+            // The villager is the exception, and it's a shape argument rather
+            // than a preference — see [ContainerExtras.prefersSideRail]. Its rail
+            // is a *fixed narrow width* rather than a weight, so the grid keeps
+            // everything else: one trade is three stacks across, and that is all
+            // the rail ever needs to be.
+            val extras = state.extras
+            val sideRail = extras?.prefersSideRail == true
+
+            if (extras != null && !sideRail) {
                 ContainerExtrasBand(
                     extras = extras,
                     syncId = state.syncId,
                     fontSheet = fontSheet,
                     glintTexture = glintTexture,
                     itemIcon = itemIcon,
+                    iconProvider = iconProvider,
                     onButton = onButton,
                     onTrade = onTrade,
                     onBeaconEffects = onBeaconEffects,
@@ -196,17 +218,38 @@ fun InventoryScreen(
                 )
             }
 
-            SlotGrid(
-                state = state,
-                plan = plan,
-                moveMode = moveMode,
-                fontSheet = fontSheet,
-                glintTexture = glintTexture,
-                itemIcon = itemIcon,
-                iconProvider = iconProvider,
-                onSlotClick = onSlotClick,
-                modifier = Modifier.fillMaxWidth().weight(1f)
-            )
+            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                SlotGrid(
+                    state = state,
+                    plan = plan,
+                    moveMode = moveMode,
+                    fontSheet = fontSheet,
+                    glintTexture = glintTexture,
+                    itemIcon = itemIcon,
+                    iconProvider = iconProvider,
+                    onSlotClick = onSlotClick,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                )
+
+                if (extras != null && sideRail) {
+                    ContainerExtrasBand(
+                        extras = extras,
+                        syncId = state.syncId,
+                        fontSheet = fontSheet,
+                        glintTexture = glintTexture,
+                        itemIcon = itemIcon,
+                        iconProvider = iconProvider,
+                        onButton = onButton,
+                        onTrade = onTrade,
+                        onBeaconEffects = onBeaconEffects,
+                        onRename = onRename,
+                        modifier = Modifier
+                            .width(SIDE_RAIL_WIDTH)
+                            .fillMaxHeight()
+                            .padding(start = PANEL_INSET)
+                    )
+                }
+            }
         }
     }
 }

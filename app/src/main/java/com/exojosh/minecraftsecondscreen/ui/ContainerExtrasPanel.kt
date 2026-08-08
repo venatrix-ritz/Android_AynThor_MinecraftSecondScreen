@@ -1,6 +1,7 @@
 package com.exojosh.minecraftsecondscreen.ui
 
 import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -25,17 +27,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.exojosh.minecraftsecondscreen.net.AnvilState
+import com.exojosh.minecraftsecondscreen.net.BeaconEffect
 import com.exojosh.minecraftsecondscreen.net.BeaconState
 import com.exojosh.minecraftsecondscreen.net.ContainerExtras
 import com.exojosh.minecraftsecondscreen.net.EnchantingOffers
 import com.exojosh.minecraftsecondscreen.net.HotbarSlot
 import com.exojosh.minecraftsecondscreen.net.MerchantTrades
+import com.exojosh.minecraftsecondscreen.net.ResourcePackIconProvider
 import com.exojosh.minecraftsecondscreen.net.SelectableList
 
 /**
@@ -84,6 +90,9 @@ fun ContainerExtrasBand(
     fontSheet: MinecraftFontSheet?,
     glintTexture: Bitmap?,
     itemIcon: (String) -> Bitmap?,
+    /** For the beacon's status effect icons, which are named by the game rather
+     *  than by a `HudIcon` entry. */
+    iconProvider: ResourcePackIconProvider,
     onButton: (syncId: Int, buttonId: Int) -> Unit,
     onTrade: (syncId: Int, index: Int) -> Unit,
     onBeaconEffects: (syncId: Int, primary: String?, secondary: String?) -> Unit,
@@ -91,7 +100,7 @@ fun ContainerExtrasBand(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(ROW_GAP)
     ) {
         when {
@@ -120,7 +129,7 @@ fun ContainerExtrasBand(
                 onPick = { index -> onButton(syncId, index) }
             )
 
-            extras.merchant != null -> TradeStrip(
+            extras.merchant != null -> TradeRail(
                 trades = extras.merchant,
                 fontSheet = fontSheet,
                 glintTexture = glintTexture,
@@ -131,6 +140,7 @@ fun ContainerExtrasBand(
             extras.beacon != null -> BeaconRows(
                 beacon = extras.beacon,
                 fontSheet = fontSheet,
+                iconProvider = iconProvider,
                 onApply = { primary, secondary -> onBeaconEffects(syncId, primary, secondary) }
             )
 
@@ -281,15 +291,26 @@ private fun LabelStrip(
 }
 
 /**
- * A villager's trades, as horizontal cards.
+ * A villager's trades, stacked down a narrow rail.
+ *
+ * <h2>Why this one is a rail and not a strip</h2>
+ * Laid out horizontally with the other containers, the trades were the worst panel
+ * on the screen: a trade is *itself* three stacks side by side, so turning the list
+ * sideways made every entry a wide card, only three or four fitted at once, and the
+ * whole thing read as a dense clump of tiny slots with an easily-missed separator.
+ *
+ * A list of rows belongs in a column. Stacked, every trade fits, each one reads
+ * left-to-right the way it does in game, and the rail only ever has to be as wide
+ * as a single trade — which is why `SIDE_RAIL_WIDTH` is a fixed narrow value rather
+ * than a weight. The grid keeps the rest.
  *
  * Tapping one selects the trade, which moves the container's own cost and result
- * slots — the exchange itself still happens by taking the result out of the grid
- * below. That split is vanilla's, not a shortcut: selecting a trade and
- * completing it are two different actions in game too.
+ * slots; the exchange itself still happens by taking the result out of the grid.
+ * That split is vanilla's, not a shortcut — selecting a trade and completing it are
+ * two different actions in game too.
  */
 @Composable
-private fun TradeStrip(
+private fun TradeRail(
     trades: MerchantTrades,
     fontSheet: MinecraftFontSheet?,
     glintTexture: Bitmap?,
@@ -298,42 +319,44 @@ private fun TradeStrip(
 ) {
     val gui = LocalMinecraftGui.current
 
-    BandHeader(
-        if (trades.leveled) "Trades - ${trades.experience} xp" else "Trades",
-        fontSheet
-    )
+    BandHeader(if (trades.leveled) "${trades.experience} xp" else "Trades", fontSheet)
     if (trades.trades.isEmpty()) {
         BandLabel("No trades", fontSheet)
         return
     }
 
-    LazyRow(
+    LazyColumn(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(ROW_GAP * 2)
+        verticalArrangement = Arrangement.spacedBy(ROW_GAP)
     ) {
         itemsIndexed(trades.trades) { index, trade ->
             Row(
                 modifier = Modifier
-                    .height(TRADE_CELL + ROW_GAP * 2)
+                    .fillMaxWidth()
+                    .height(TRADE_CELL + ROW_GAP)
                     // Out of stock stays on screen and greyed. Removing the row
                     // would renumber every trade after it while the player was
                     // looking at it, and the index is what gets sent.
                     .background(if (trade.disabled) TRADE_DISABLED else Color.Transparent)
-                    .padding(horizontal = ROW_GAP)
                     .semantics { contentDescription = "Trade ${index + 1}" }
                     .clickable(enabled = !trade.disabled) { onPick(index) },
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                horizontalArrangement = Arrangement.spacedBy(1.dp)
             ) {
                 TradeSlot(trade.firstCost, gui.slot, fontSheet, glintTexture, itemIcon)
+                // An absent second cost still holds its place, so the result
+                // column lines up down the rail instead of shuffling left on
+                // every one-item trade.
                 if (trade.secondCost.itemId != InventoryMoves.AIR_ITEM_ID) {
                     TradeSlot(trade.secondCost, gui.slot, fontSheet, glintTexture, itemIcon)
+                } else {
+                    Spacer(modifier = Modifier.size(TRADE_CELL))
                 }
                 // ASCII only: the bitmap font sheet covers 0x00-0xFF, and an
                 // arrow glyph came out as a literal '?'.
-                BandLabel(">", fontSheet)
+                BandLabel(if (trade.disabled) "x" else ">", fontSheet,
+                    if (trade.disabled) PANEL_TEXT_DIM else PANEL_TEXT)
                 TradeSlot(trade.sell, gui.slot, fontSheet, glintTexture, itemIcon)
-                if (trade.disabled) BandLabel("out", fontSheet, PANEL_TEXT_DIM)
             }
         }
     }
@@ -381,6 +404,7 @@ private fun TradeSlot(
 private fun BeaconRows(
     beacon: BeaconState,
     fontSheet: MinecraftFontSheet?,
+    iconProvider: ResourcePackIconProvider,
     onApply: (String?, String?) -> Unit
 ) {
     // Keyed on what the server says, so a change made on the top screen replaces
@@ -394,47 +418,51 @@ private fun BeaconRows(
         fontSheet
     )
 
-    LazyRow(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
-    ) {
-        items(beacon.primaryOptions) { effect ->
-            val unlocked = beacon.level >= effect.tier
-            MinecraftButton(
-                text = if (unlocked) effect.name else "${effect.name} (${effect.tier})",
-                onClick = { primary = effect.id },
-                enabled = unlocked,
-                selected = primary == effect.id,
-                modifier = Modifier.height(ROW_HEIGHT)
-            )
-        }
-    }
-
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(ROW_GAP),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        beacon.primaryOptions.forEach { effect ->
+            EffectButton(
+                effect = effect,
+                icon = iconProvider.getStatusEffectIcon(effect.id),
+                unlocked = beacon.level >= effect.tier,
+                selected = primary == effect.id,
+                fontSheet = fontSheet,
+                onClick = { primary = effect.id }
+            )
+        }
+
+        // A visible break between what the beacon does and what it does *extra* --
+        // the two rows carry different meanings and vanilla separates them with a
+        // whole panel divider.
+        Spacer(modifier = Modifier.width(ROW_GAP * 3))
+
         beacon.secondaryOptions.forEach { effect ->
-            val unlocked = beacon.level >= effect.tier
-            MinecraftButton(
-                text = if (unlocked) effect.name else "${effect.name} (${effect.tier})",
-                onClick = { secondary = effect.id },
-                enabled = unlocked,
+            EffectButton(
+                effect = effect,
+                icon = iconProvider.getStatusEffectIcon(effect.id),
+                unlocked = beacon.level >= effect.tier,
                 selected = secondary != null && secondary == effect.id,
-                modifier = Modifier.height(ROW_HEIGHT)
+                fontSheet = fontSheet,
+                onClick = { secondary = effect.id }
             )
         }
         // Vanilla's second secondary option: spend the payment on doubling the
         // primary rather than adding regeneration. It's the primary's own id in
-        // both slots, which is why the mod doesn't list it as an effect.
-        MinecraftButton(
-            text = "Amplify",
-            onClick = { secondary = primary },
-            enabled = beacon.level >= AMPLIFY_LEVEL && primary != null,
+        // both slots, which is why the mod doesn't list it as an effect -- and why
+        // it borrows the chosen primary's icon here rather than having one.
+        EffectButton(
+            effect = BeaconEffect(id = "", name = "Amplify", tier = AMPLIFY_LEVEL),
+            icon = iconProvider.getStatusEffectIcon(primary),
+            unlocked = beacon.level >= AMPLIFY_LEVEL && primary != null,
             selected = secondary != null && secondary == primary,
-            modifier = Modifier.height(ROW_HEIGHT)
+            fontSheet = fontSheet,
+            badge = "2x",
+            onClick = { secondary = primary }
         )
+
         Spacer(modifier = Modifier.weight(1f))
         MinecraftButton(
             text = "Apply",
@@ -443,6 +471,83 @@ private fun BeaconRows(
             enabled = beacon.hasPayment && primary != null,
             modifier = Modifier.height(ROW_HEIGHT)
         )
+    }
+}
+
+/**
+ * One beacon effect as its game icon in a slot cell.
+ *
+ * These used to be text buttons — a row reading "Speed Haste Resistance Jump Boost
+ * Strength" that was mostly words and looked nothing like the game's own picker.
+ * The icons are vanilla's `textures/mob_effect/` sprites, served by the mod.
+ *
+ * A locked effect keeps its icon but dimmed, with the beacon level it needs in the
+ * corner — omitting it would leave a player with a half-built pyramid wondering
+ * what finishing it buys, and greying it without saying *why* is barely better.
+ * The name still rides along as the content description, which is the only text a
+ * test or a screen reader could find on a cell whose content is a bitmap.
+ *
+ * Falls back to a text button when the icon hasn't arrived (or the effect isn't one
+ * of the six the catalog serves), so a datapack effect degrades to the old
+ * appearance rather than to an empty cell.
+ */
+@Composable
+private fun EffectButton(
+    effect: BeaconEffect,
+    icon: Bitmap?,
+    unlocked: Boolean,
+    selected: Boolean,
+    fontSheet: MinecraftFontSheet?,
+    badge: String? = null,
+    onClick: () -> Unit
+) {
+    if (icon == null) {
+        MinecraftButton(
+            text = if (unlocked) effect.name else "${effect.name} (${effect.tier})",
+            onClick = onClick,
+            enabled = unlocked,
+            selected = selected,
+            modifier = Modifier.height(ROW_HEIGHT)
+        )
+        return
+    }
+
+    val gui = LocalMinecraftGui.current
+
+    Box(
+        modifier = Modifier
+            .size(EFFECT_CELL)
+            .vanillaSlot(gui.slot)
+            .semantics { contentDescription = effect.name }
+            .clickable(enabled = unlocked, onClick = onClick)
+    ) {
+        Image(
+            bitmap = icon.asImageBitmap(),
+            contentDescription = null,
+            filterQuality = FilterQuality.None,
+            alpha = if (unlocked) 1f else LOCKED_ALPHA,
+            modifier = Modifier.fillMaxSize().padding(EFFECT_CELL / SLOT_PIXELS)
+        )
+
+        // The level it needs, bottom-right where a stack count goes -- the one
+        // place on a slot a player already reads a number.
+        if (!unlocked) {
+            BandLabel(
+                effect.tier.toString(),
+                fontSheet,
+                Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(1.dp)
+            )
+        } else if (badge != null) {
+            BandLabel(
+                badge,
+                fontSheet,
+                Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(1.dp)
+            )
+        }
+
+        if (selected) SelectionBorder()
     }
 }
 
@@ -541,7 +646,7 @@ private fun SelectionBorder() {
 
 @Composable
 private fun BandHeader(text: String, fontSheet: MinecraftFontSheet?) {
-    BandLabel(text, fontSheet, Color.White, TITLE_PIXEL)
+    BandLabel(text, fontSheet, Color.White, pixelSize = TITLE_PIXEL)
 }
 
 @Composable
@@ -549,6 +654,7 @@ private fun BandLabel(
     text: String,
     fontSheet: MinecraftFontSheet?,
     color: Color = PANEL_TEXT,
+    modifier: Modifier = Modifier,
     pixelSize: Dp = LABEL_PIXEL
 ) {
     if (fontSheet != null) {
@@ -557,12 +663,13 @@ private fun BandLabel(
             fontSheet = fontSheet,
             pixelSize = pixelSize,
             color = color,
-            style = MinecraftTextStyle.SHADOW
+            style = MinecraftTextStyle.SHADOW,
+            modifier = modifier
         )
     } else {
         // The asset bundle is still streaming in. Plain Compose text rather than
         // nothing, so the band is usable on a fresh connection.
-        androidx.compose.material3.Text(text = text, color = color)
+        androidx.compose.material3.Text(text = text, color = color, modifier = modifier)
     }
 }
 
@@ -573,6 +680,13 @@ private const val AMPLIFY_LEVEL = 4
 private val ROW_HEIGHT = 26.dp
 private val ROW_GAP = 3.dp
 private val OPTION_CELL = 38.dp
+/** Beacon effect cells. Bigger than a trade slot because they're the primary
+ *  targets on that panel, and vanilla's own effect buttons are chunky too. */
+private val EFFECT_CELL = 34.dp
+/** A locked effect keeps its icon, dimmed enough to read as unavailable while
+ *  still being recognisable -- the point is to show what finishing the pyramid
+ *  would buy. */
+private const val LOCKED_ALPHA = 0.3f
 private val TRADE_CELL = 26.dp
 private val TITLE_PIXEL = 1.75.dp
 private val LABEL_PIXEL = 1.5.dp
