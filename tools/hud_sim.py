@@ -199,6 +199,9 @@ def container(handler_type, title, slots, extras=None, progress=None, cursor=Non
         "hotbarStart": len(slots) + 27,
         "armorStart": -1,
         "offhandIndex": -1,
+        # What the app's tab takeover triggers on. True for every container
+        # scenario: the point of one is a container the player is looking at.
+        "screenOpen": True,
     }
     if progress:
         msg["progress"] = progress
@@ -448,6 +451,106 @@ SCENARIOS = {
 for _name, _msg in CONTAINERS.items():
     SCENARIOS[_name] = {"__container": _msg}
 
+# Creative mode: the app only offers its Creative tab when the snapshot says so,
+# so the scenario has to set the game mode as well as answer CREATIVE.
+SCENARIOS["creative"] = {"gameMode": "CREATIVE"}
+
+
+def player_inventory_container(screen_open):
+    """The player's own handler, with vanilla's slot roles.
+
+    `armorStart >= 0` is the *only* thing that tells the app this is the player's
+    own inventory rather than a modded container built with no type -- both report
+    a null handler type. And `screenOpen` is the only thing that separates "the
+    player is looking at their inventory" from "no screen at all", since the
+    player's handler is current either way.
+    """
+    equipment = [
+        cslot(154, 28, may_place=False),                                    # 0 result
+        cslot(98, 18), cslot(116, 18), cslot(98, 36), cslot(116, 36),       # 1-4 grid
+        cslot(8, 8, bg="minecraft:container/slot/helmet"),                  # 5-8 armor
+        cslot(8, 26, "minecraft:iron_chestplate", bg="minecraft:container/slot/chestplate"),
+        cslot(8, 44, bg="minecraft:container/slot/leggings"),
+        cslot(8, 62, "minecraft:iron_boots", bg="minecraft:container/slot/boots"),
+    ]
+    msg = {
+        "type": "container",
+        "syncId": 0,
+        "handlerType": None,
+        "title": None,
+        "screenOpen": screen_open,
+        "cursor": slot("minecraft:air", 0),
+        "slots": equipment + player_slots() + [
+            cslot(77, 62, "minecraft:shield", bg="minecraft:container/slot/shield"),
+        ],
+        "playerStart": 9,
+        "hotbarStart": 36,
+        "armorStart": 5,
+        "offhandIndex": 45,
+    }
+    return msg
+
+
+# The player's own inventory, open -- which is what makes the takeover fire for
+# the Inventory kind, and the pair below is the check that `screenOpen` is what
+# does it rather than the container merely existing.
+SCENARIOS["inventory-open"] = {"__container": player_inventory_container(True)}
+SCENARIOS["inventory-closed"] = {"__container": player_inventory_container(False)}
+
+
+def load_creative_catalog(jar_path):
+    """A creative catalogue, from the item models actually present in the jar.
+
+    Grouped by a crude keyword match rather than by vanilla's real item groups --
+    the simulator has no registry to ask, and the picker only cares that there are
+    several tabs with a few hundred items between them. Names and grouping being
+    approximate is fine; the shape of the message is what's being exercised.
+    """
+    prefix = "assets/minecraft/models/item/"
+    suffix = ".json"
+    with zipfile.ZipFile(jar_path) as z:
+        # Sliced rather than regexed: an item id is just the middle of a known
+        # prefix and a known suffix, and a backreference is one escaping slip
+        # away from silently yielding an empty id for every entry -- which is
+        # exactly what happened the first time this was written.
+        ids = sorted({
+            name[len(prefix):-len(suffix)]
+            for name in z.namelist()
+            if name.startswith(prefix) and name.endswith(suffix)
+            and "/" not in name[len(prefix):]
+        })
+
+    buckets = [
+        ("building_blocks", "Building Blocks", "minecraft:bricks",
+         ("planks", "stone", "brick", "concrete", "terracotta", "wool", "sandstone")),
+        ("tools", "Tools & Utilities", "minecraft:iron_axe",
+         ("axe", "pickaxe", "shovel", "hoe", "shears", "bucket", "flint")),
+        ("combat", "Combat", "minecraft:iron_sword",
+         ("sword", "helmet", "chestplate", "leggings", "boots", "shield", "arrow", "bow")),
+        ("food", "Food & Drink", "minecraft:bread",
+         ("apple", "bread", "beef", "porkchop", "chicken", "carrot", "potato", "stew")),
+        ("redstone", "Redstone", "minecraft:redstone",
+         ("redstone", "piston", "repeater", "comparator", "observer", "lever", "button")),
+    ]
+
+    groups = []
+    claimed = set()
+    for group_id, name, icon, keywords in buckets:
+        items = [f"minecraft:{i}" for i in ids
+                 if any(k in i for k in keywords) and i not in claimed]
+        claimed.update(i.split(":", 1)[1] for i in items)
+        if items:
+            groups.append({"id": f"minecraft:{group_id}", "name": name,
+                           "icon": icon, "items": items})
+
+    # Everything else, so the picker has a tab that is genuinely large.
+    rest = [f"minecraft:{i}" for i in ids if i not in claimed]
+    if rest:
+        groups.append({"id": "minecraft:misc", "name": "Miscellaneous",
+                       "icon": "minecraft:stick", "items": rest})
+
+    return {"type": "creative", "groups": groups}
+
 
 def load_assets(jar_path):
     out = {}
@@ -510,7 +613,7 @@ ICON_FALLBACKS = {
 }
 
 
-def load_item_textures(jar_path):
+def load_item_textures(jar_path, extra_items=()):
     """Cheap stand-in for ItemIconRenderer: the flat item/block texture.
 
     Not isometric -- this simulator is for exercising the app's layout, not for
@@ -528,7 +631,11 @@ def load_item_textures(jar_path):
             return None
 
         missing = []
-        for item in wanted_items():
+        # The creative catalogue's ids come in through extra_items: it is a
+        # thousand-odd items and the picker draws a grid of them, so without
+        # these the screenshots would be a wall of empty cells that looked like
+        # broken icon delivery rather than a simulator with nothing to serve.
+        for item in sorted(set(wanted_items()) | set(extra_items)):
             short = item.split(":", 1)[1]
             data = read(f"item/{short}") or read(f"block/{short}")
             if data is None and item in ICON_FALLBACKS:
@@ -538,7 +645,9 @@ def load_item_textures(jar_path):
             else:
                 tex[item] = data
         if missing:
-            print(f"  no flat texture for: {', '.join(missing)}")
+            shown = missing[:6]
+            more = '' if len(missing) <= 6 else f' (+{len(missing) - 6} more)'
+            print(f"  no flat texture for: {', '.join(shown)}{more}")
     return tex
 
 
@@ -704,7 +813,7 @@ def apply_container_command(msg, cmd):
     return False
 
 
-def handle(conn, addr, assets, item_tex, state, open_container=None):
+def handle(conn, addr, assets, item_tex, state, open_container=None, creative=None):
     """Serves one client.
 
     [open_container] is passed alongside [state] rather than living inside it,
@@ -771,6 +880,15 @@ def handle(conn, addr, assets, item_tex, state, open_container=None):
                         send({"type": "asset", "assetId": k, "data": d})
                 elif cmd == "BINDINGS":
                     send({"type": "bindings", "bindings": BINDINGS})
+                elif cmd == "CREATIVE":
+                    send(creative)
+                    print(f"[sim] sent creative catalogue: {len(creative['groups'])} groups, "
+                          f"{sum(len(g['items']) for g in creative['groups'])} items")
+                elif cmd.startswith("GIVE:"):
+                    # Nothing to model: in the real mod this hands the player an
+                    # item, which the app never reads back. Logged so a tap is
+                    # visibly arriving.
+                    pass
                 elif cmd.startswith("CHAT:"):
                     said = cmd[5:]
                     # The real server echoes what you say back as a chat
@@ -871,7 +989,9 @@ def main():
 
     print("[sim] loading textures from jar...")
     assets = load_assets(jar)
-    item_tex = load_item_textures(jar)
+    creative = load_creative_catalog(jar)
+    item_tex = load_item_textures(
+        jar, [i for g in creative["groups"] for i in g["items"]])
     print(f"[sim] {sum(1 for v in assets.values() if v)} assets, {len(item_tex)} item textures")
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -883,7 +1003,8 @@ def main():
     while True:
         conn, addr = srv.accept()
         threading.Thread(target=handle,
-                         args=(conn, addr, assets, item_tex, state, open_container),
+                         args=(conn, addr, assets, item_tex, state, open_container,
+                               creative),
                          daemon=True).start()
 
 

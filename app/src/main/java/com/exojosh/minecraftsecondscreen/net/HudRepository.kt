@@ -321,6 +321,21 @@ data class ContainerExtras(
     val prefersSideRail: Boolean get() = merchant != null
 }
 
+/**
+ * One creative tab: its name, an item to label it with, and everything in it.
+ *
+ * Contents are **item ids, not images**. The app already has an on-demand icon
+ * path, so the picker reuses it rather than needing a second bulk image channel —
+ * and an icon is cached after the first look either way. A tab is a few hundred
+ * ids at most.
+ */
+data class CreativeGroup(
+    val id: String,
+    val name: String,
+    val icon: String?,
+    val items: List<String>
+)
+
 data class ContainerState(
     val syncId: Int,
     val handlerType: String?,
@@ -328,6 +343,19 @@ data class ContainerState(
      *  chest's own name). Null for the player's own handler, which the mod
      *  deliberately leaves unlabelled — see `ContainerRelay.ScreenHandlerState`. */
     val title: String? = null,
+    /**
+     * Whether the game actually has this handler's screen open.
+     *
+     * `currentScreenHandler` can't answer this: the player's own handler is
+     * current both with the inventory screen open and with no screen at all, so
+     * "is the player looking at an inventory right now" was unknowable here until
+     * the mod started sending it. This is what the tab takeover triggers on.
+     *
+     * Defaults to false against an older mod build, which reads as "never take
+     * over" — the safe direction, since the alternative would be a second screen
+     * that jumps to the Items tab and never comes back.
+     */
+    val screenOpen: Boolean = false,
     /** What's "on the mouse". Non-empty means a move is half-finished — it has
      *  to be drawn, or the player can't see where their item went. */
     val cursor: HotbarSlot,
@@ -404,6 +432,15 @@ data class HudState(
 
     /** Vanilla draws no hotbar for a spectator either. */
     val isSpectator: Boolean get() = gameMode == "SPECTATOR"
+
+    /**
+     * Whether the creative item picker applies.
+     *
+     * Compared to the enum's own name, as the mod sends it. Null — an older mod
+     * build — reads as *not* creative, which is the safe direction: the picker
+     * would be a tab that looks functional and whose taps the mod refuses.
+     */
+    val isCreative: Boolean get() = gameMode == "CREATIVE"
 }
 
 /**
@@ -493,6 +530,23 @@ class HudRepository(private val scope: CoroutineScope) {
      */
     private val _container = MutableStateFlow<ContainerState?>(null)
     val container: StateFlow<ContainerState?> = _container.asStateFlow()
+
+    /**
+     * The creative item catalogue, or empty until it's been asked for.
+     *
+     * Deliberately **not** cleared on disconnect or on `noplayer`, for the same
+     * reason `bindings` and `assetCache` aren't: it's the game's item list, it
+     * doesn't belong to a world, and dropping it would make the picker flash back
+     * to empty through a reconnect and then re-download a few tens of kilobytes.
+     */
+    private val _creativeGroups = MutableStateFlow<List<CreativeGroup>>(emptyList())
+    val creativeGroups: StateFlow<List<CreativeGroup>> = _creativeGroups.asStateFlow()
+
+    /** So the catalogue is asked for once rather than on every recomposition of
+     *  the picker -- `requestCreative` is called from composition, like
+     *  `requestIcon`, and has to tolerate being hit every frame. */
+    @Volatile
+    private var creativeRequested = false
 
     /** Item id -> decoded icon bitmap. mutableStateMapOf so Compose recomposes
      *  automatically the moment a requested icon arrives -- no manual refresh needed. */
@@ -650,6 +704,11 @@ class HudRepository(private val scope: CoroutineScope) {
             // connection re-asks immediately instead of waiting out timeouts.
             pendingIconRequests.clear()
             failedIconRequests.clear()
+            // The latch, not the catalogue: the groups depend on the server's
+            // feature flags and the player's operator permission, so the next
+            // connection has to re-ask -- but the list it replaces stays on screen
+            // until the answer lands rather than blanking the picker.
+            creativeRequested = false
             // Keep assetCache -- the mod re-sends the bundle on reconnect, and
             // holding the old bitmaps avoids the HUD flashing back to
             // placeholders in between. Misses are cleared so a re-send can
@@ -674,6 +733,7 @@ class HudRepository(private val scope: CoroutineScope) {
                 "bindings" -> handleBindingsResponse(json)
                 "chat" -> handleChatResponse(json)
                 "container" -> handleContainerResponse(json)
+                "creative" -> handleCreativeResponse(json)
                 "noplayer" -> handleNoPlayer()
                 "hello" -> handleHello(json)
                 else -> handleHudState(json)
@@ -752,6 +812,27 @@ class HudRepository(private val scope: CoroutineScope) {
     /** Asks the mod to re-send the key bindings -- worth doing whenever the
      *  picker opens, since a rebind in game pushes nothing on its own. */
     fun requestBindings() = sendCommand("BINDINGS")
+
+    /**
+     * Asks for the creative item catalogue, once.
+     *
+     * Called from composition, so it must tolerate being hit every frame -- same
+     * constraint as [requestIcon], and the same shape of answer. The latch is
+     * cleared on disconnect rather than never, so a reconnect re-asks: the
+     * catalogue depends on the server's feature flags and the player's operator
+     * permission, both of which can differ on the next world.
+     */
+    fun requestCreative() {
+        if (creativeRequested || writer == null) return
+        creativeRequested = true
+        sendCommand("CREATIVE")
+    }
+
+    /**
+     * Hands the player an item. Creative only; the mod refuses it otherwise rather
+     * than trusting the app to know the game mode at the moment of the tap.
+     */
+    fun sendGive(itemId: String) = sendCommand("GIVE:$itemId")
 
     /**
      * One chat line, as coloured runs.
@@ -859,6 +940,7 @@ class HudRepository(private val scope: CoroutineScope) {
             syncId = json.getInt("syncId"),
             handlerType = if (json.isNull("handlerType")) null else json.optString("handlerType"),
             title = if (json.isNull("title")) null else json.optString("title").ifEmpty { null },
+            screenOpen = json.optBoolean("screenOpen", false),
             cursor = parseSlot(json.getJSONObject("cursor")),
             slots = slots,
             playerStart = json.getInt("playerStart"),
@@ -874,6 +956,29 @@ class HudRepository(private val scope: CoroutineScope) {
                 // otherwise do here.
                 ?.takeUnless { it.isEmpty }
         )
+    }
+
+    /**
+     * The creative item catalogue.
+     *
+     * Arrives once per request. Replaces whatever was held rather than merging:
+     * the groups depend on the server's feature flags, so a second world's answer
+     * is the authority and a stale group would offer items the server refuses.
+     */
+    private fun handleCreativeResponse(json: JSONObject) {
+        val groups = json.optJSONArray("groups").mapObjects { group ->
+            val items = group.optJSONArray("items")
+            CreativeGroup(
+                id = group.optString("id"),
+                name = group.optString("name"),
+                icon = if (group.isNull("icon")) null else group.optString("icon").ifEmpty { null },
+                items = if (items == null) emptyList()
+                else (0 until items.length()).map { items.getString(it) }
+            )
+        }
+        _creativeGroups.value = groups
+        Log.i(TAG, "Creative catalogue: ${groups.size} groups, " +
+            "${groups.sumOf { it.items.size }} items")
     }
 
     /** Each kind is absent unless the open handler is that kind, so every field is

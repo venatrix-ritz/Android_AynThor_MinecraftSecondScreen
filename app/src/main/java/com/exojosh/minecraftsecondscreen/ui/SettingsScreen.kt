@@ -28,10 +28,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.exojosh.minecraftsecondscreen.net.GameBinding
 import com.exojosh.minecraftsecondscreen.settings.ChatSettings
+import com.exojosh.minecraftsecondscreen.settings.ContainerKind
+import com.exojosh.minecraftsecondscreen.settings.ContainerSettings
 import com.exojosh.minecraftsecondscreen.settings.HudElement
 import com.exojosh.minecraftsecondscreen.settings.HudSettings
 import com.exojosh.minecraftsecondscreen.settings.INPUT_SLOT_COUNT
 import com.exojosh.minecraftsecondscreen.settings.InputSettings
+
+/**
+ * Every container toggle means the same thing, so they share one line rather
+ * than each inventing a sentence about itself. The list is long enough that
+ * fifteen near-identical descriptions would be harder to scan, not easier.
+ */
+private const val CONTAINER_TOGGLE_DESCRIPTION =
+    "Switch to Items when this opens, and back when it closes"
 
 /** Reset/Cancel: a game button, but not a thumb-sized one — these sit in a
  *  header beside text, not in a row of controls being aimed at. */
@@ -68,6 +78,7 @@ fun SettingsScreen(
     settings: HudSettings,
     inputSettings: InputSettings,
     chatSettings: ChatSettings,
+    containerSettings: ContainerSettings,
     bindings: List<GameBinding>,
     onRequestBindings: () -> Unit
 ) {
@@ -114,6 +125,27 @@ fun SettingsScreen(
                 element = element,
                 checked = settings.isVisible(element),
                 onToggle = { settings.toggle(element) }
+            )
+        }
+
+        item {
+            SectionHeader(
+                title = "Open the Items tab automatically",
+                // Says what "off" means, because the toggle otherwise reads as
+                // "disable this container" -- which it isn't. The panel stays
+                // reachable by hand either way; only the takeover stops.
+                subtitle = "Anything switched off still works — you just have to " +
+                    "tap Items yourself",
+                onReset = containerSettings::reset
+            )
+        }
+
+        items(ContainerKind.entries) { kind ->
+            SettingToggle(
+                label = kind.label,
+                description = CONTAINER_TOGGLE_DESCRIPTION,
+                checked = containerSettings.opensAutomatically(kind),
+                onToggle = { containerSettings.toggle(kind) }
             )
         }
 

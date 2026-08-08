@@ -32,7 +32,7 @@ param(
     [int]$LogicalDisplayId = 4,
     # Which tab to switch to before capturing. The app always starts on HUD, so a
     # container scenario captured without this is a screenshot of the map.
-    [ValidateSet("HUD", "Chat", "Items", "Input", "Settings")]
+    [ValidateSet("HUD", "Chat", "Items", "Creative", "Input", "Settings")]
     [string]$Tab = "HUD",
     [string]$Package = "com.exojosh.minecraftsecondscreen"
 )
@@ -45,7 +45,12 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 # hardcoded, so this works on hardware that isn't the Thor. The numbers mirror
 # SecondScreenApp: a 44dp strip at the bottom holding five equal-weight buttons
 # with 4dp of horizontal padding and 4dp between them.
-$TAB_ORDER = @("HUD", "Chat", "Items", "Input", "Settings")
+# Must match SecondScreenTab, including that Creative only exists in creative
+# mode -- so the tap arithmetic depends on which scenario is running, not just
+# on the display. -Tab Creative implies the six-tab strip; anything else
+# assumes five.
+$TAB_ORDER_SURVIVAL = @("HUD", "Chat", "Items", "Input", "Settings")
+$TAB_ORDER_CREATIVE = @("HUD", "Chat", "Items", "Creative", "Input", "Settings")
 $TAB_STRIP_DP = 44
 $TAB_PAD_DP = 4
 $TAB_GAP_DP = 4
@@ -61,11 +66,13 @@ function Get-TabTapPoint([string]$name) {
     if ($densityText -notmatch '(\d+)') { throw "could not read density: $densityText" }
     $scale = [int]$Matches[1] / 160.0
 
+    $order = if ($name -eq "Creative") { $TAB_ORDER_CREATIVE } else { $TAB_ORDER_SURVIVAL }
+    $count = $order.Count
     $pad = $TAB_PAD_DP * $scale
     $gap = $TAB_GAP_DP * $scale
     $strip = $TAB_STRIP_DP * $scale
-    $button = ($width - 2 * $pad - 4 * $gap) / 5
-    $index = $TAB_ORDER.IndexOf($name)
+    $button = ($width - 2 * $pad - ($count - 1) * $gap) / $count
+    $index = $order.IndexOf($name)
     if ($index -lt 0) { throw "unknown tab $name" }
 
     $x = $pad + $index * ($button + $gap) + $button / 2

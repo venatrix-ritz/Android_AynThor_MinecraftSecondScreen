@@ -29,6 +29,7 @@ import com.exojosh.minecraftsecondscreen.net.HudIcon
 import com.exojosh.minecraftsecondscreen.net.HudRepository
 import com.exojosh.minecraftsecondscreen.net.ResourcePackIconProvider
 import com.exojosh.minecraftsecondscreen.ui.ChatScreen
+import com.exojosh.minecraftsecondscreen.ui.CreativeScreen
 import com.exojosh.minecraftsecondscreen.ui.HudScreen
 import com.exojosh.minecraftsecondscreen.ui.InputGridScreen
 import com.exojosh.minecraftsecondscreen.ui.InventoryScreen
@@ -40,8 +41,10 @@ import com.exojosh.minecraftsecondscreen.ui.SettingsScreen
 import com.exojosh.minecraftsecondscreen.ui.rememberChatDraftState
 import com.exojosh.minecraftsecondscreen.ui.rememberMinecraftFont
 import com.exojosh.minecraftsecondscreen.ui.rememberMinecraftGuiTextures
+import com.exojosh.minecraftsecondscreen.settings.ContainerKind
 import com.exojosh.minecraftsecondscreen.settings.HudElement
 import com.exojosh.minecraftsecondscreen.settings.rememberChatSettings
+import com.exojosh.minecraftsecondscreen.settings.rememberContainerSettings
 import com.exojosh.minecraftsecondscreen.settings.rememberHudSettings
 import com.exojosh.minecraftsecondscreen.settings.rememberInputSettings
 
@@ -82,11 +85,22 @@ enum class SecondScreenTab(
      * glance at it mid-fight — so the vital signs are worth less here than
      * anywhere else.
      */
-    val showsStatusStack: Boolean = true
+    val showsStatusStack: Boolean = true,
+    /**
+     * Whether this tab only exists in creative mode.
+     *
+     * [CREATIVE] is the only one, and it's hidden rather than disabled in survival
+     * because it isn't a thing that's temporarily unavailable — the mod refuses a
+     * `GIVE:` outside creative, so a visible tab would be a button that looks
+     * functional and does nothing. Six tabs across a 1240px strip is also about the
+     * limit before the labels stop fitting.
+     */
+    val creativeOnly: Boolean = false
 ) {
     HUD("HUD"),
     CHAT("Chat"),
     ITEMS("Items", showsStatusStack = false),
+    CREATIVE("Creative", showsStatusStack = false, creativeOnly = true),
     INPUT("Input"),
     SETTINGS("Settings")
 }
@@ -102,11 +116,73 @@ fun SecondScreenApp(
     val bindings by hudRepository.bindings.collectAsState()
     val chatMessages by hudRepository.chatMessages.collectAsState()
     val container by hudRepository.container.collectAsState()
+    val creativeGroups by hudRepository.creativeGroups.collectAsState()
     val portConflict by hudRepository.portConflict.collectAsState()
     var selectedTab by remember { mutableStateOf(SecondScreenTab.HUD) }
     val settings = rememberHudSettings()
     val inputSettings = rememberInputSettings()
     val chatSettings = rememberChatSettings()
+    val containerSettings = rememberContainerSettings()
+
+    // Which tabs apply right now. The Creative tab exists only in creative, and a
+    // player switching back to survival must not be left sitting on it -- the
+    // guard below is what moves them off rather than leaving a blank panel with no
+    // button to escape it.
+    val visibleTabs = remember(hudState?.isCreative) {
+        SecondScreenTab.entries.filter { !it.creativeOnly || hudState?.isCreative == true }
+    }
+    LaunchedEffect(visibleTabs) {
+        if (selectedTab !in visibleTabs) selectedTab = SecondScreenTab.HUD
+    }
+
+    /**
+     * The tab to go back to when the container closes, or null when the player got
+     * to the Items tab on their own.
+     *
+     * Held here rather than derived, because "where was I?" is genuinely history:
+     * once the takeover has switched tabs there is nothing left on screen that
+     * remembers what was there before.
+     */
+    var tabBeforeContainer by remember { mutableStateOf<SecondScreenTab?>(null) }
+
+    val screenOpen = container?.screenOpen == true
+    val containerKind = container?.let {
+        ContainerKind.of(it.handlerType, it.isPlayerInventory)
+    }
+
+    /**
+     * Follow the game: when a container opens, show the Items tab; when it closes,
+     * put back whatever was there before.
+     *
+     * **Keyed on `screenOpen` and the handler, not on the container state.** That
+     * message arrives on every slot change, and re-running this on each of them
+     * would drag the player back to Items every time an item moved — including
+     * while they were deliberately reading the map.
+     *
+     * A manual tab change while the container is open clears the memory, so the
+     * takeover never fights a deliberate choice: if you open a chest and then go
+     * to Chat, closing the chest leaves you on Chat.
+     *
+     * Which containers do this is per-kind and defaults to on
+     * ([ContainerSettings]) — a grindstone is often a two-second visit, and having
+     * the screen jump off the map and back for it is worse than not helping.
+     */
+    LaunchedEffect(screenOpen, containerKind) {
+        if (screenOpen && containerKind != null) {
+            if (selectedTab != SecondScreenTab.ITEMS &&
+                containerSettings.opensAutomatically(containerKind)
+            ) {
+                tabBeforeContainer = selectedTab
+                selectedTab = SecondScreenTab.ITEMS
+            }
+        } else {
+            // Closed. Restore only if we were the reason the tab changed.
+            tabBeforeContainer?.let { previous ->
+                if (selectedTab == SecondScreenTab.ITEMS) selectedTab = previous
+            }
+            tabBeforeContainer = null
+        }
+    }
 
     // Held here rather than inside ChatScreen because a tab switch disposes the
     // panel's content: a draft owned down there would be lost by glancing at
@@ -226,6 +302,16 @@ fun SecondScreenApp(
                             onRename = hudRepository::sendRename
                         )
 
+                        SecondScreenTab.CREATIVE -> CreativeScreen(
+                            groups = creativeGroups,
+                            fontSheet = chatFont,
+                            glintTexture = iconProvider.getIcon(HudIcon.ENCHANTED_GLINT),
+                            isConnected = isConnected,
+                            itemIcon = hudRepository::requestIcon,
+                            onRequestCatalogue = hudRepository::requestCreative,
+                            onGive = hudRepository::sendGive
+                        )
+
                         SecondScreenTab.INPUT -> InputGridScreen(
                             settings = inputSettings,
                             bindings = bindings,
@@ -236,6 +322,7 @@ fun SecondScreenApp(
                             settings = settings,
                             inputSettings = inputSettings,
                             chatSettings = chatSettings,
+                            containerSettings = containerSettings,
                             bindings = bindings,
                             onRequestBindings = hudRepository::requestBindings
                         )
@@ -286,10 +373,17 @@ fun SecondScreenApp(
                 // only Material-looking thing left on the screen. Equal weights
                 // rather than SpaceEvenly: nine-sliced buttons of five
                 // different widths read as five different controls.
-                SecondScreenTab.entries.forEach { tab ->
+                visibleTabs.forEach { tab ->
                     MinecraftButton(
                         text = tab.label,
-                        onClick = { selectedTab = tab },
+                        onClick = {
+                            selectedTab = tab
+                            // A deliberate choice outranks the container takeover:
+                            // forgetting where we came from is what stops the
+                            // closing container yanking the player off the tab
+                            // they just picked.
+                            tabBeforeContainer = null
+                        },
                         selected = selectedTab == tab,
                         modifier = Modifier.weight(1f).height(40.dp)
                     )
