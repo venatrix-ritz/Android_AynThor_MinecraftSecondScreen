@@ -6,7 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,14 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
-// Both `items` overloads are needed: the grid one and the list one are extensions
-// on different scopes, so Kotlin picks by receiver -- but importing only the grid
-// one makes `items(aList)` inside a LazyColumn resolve to the grid's
-// `items(count: Int)` and fail on the element type.
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
@@ -33,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
@@ -40,38 +33,52 @@ import androidx.compose.ui.unit.dp
 import com.exojosh.minecraftsecondscreen.net.AnvilState
 import com.exojosh.minecraftsecondscreen.net.BeaconState
 import com.exojosh.minecraftsecondscreen.net.ContainerExtras
-import com.exojosh.minecraftsecondscreen.net.ContainerOption
 import com.exojosh.minecraftsecondscreen.net.EnchantingOffers
 import com.exojosh.minecraftsecondscreen.net.HotbarSlot
 import com.exojosh.minecraftsecondscreen.net.MerchantTrades
 import com.exojosh.minecraftsecondscreen.net.SelectableList
 
 /**
- * The controls for a container whose function isn't its slots.
+ * The controls for a container whose function isn't its slots, as a band across
+ * the top of the Items tab.
  *
  * <h2>Why these exist</h2>
- * Slot geometry made every container legible; it did nothing for the five whose
+ * Slot geometry made every container legible; it did nothing for the six whose
  * actual function is a *choice*. An enchanting table is three offers, a
  * stonecutter a recipe list, a loom a pattern list, a villager a trade list, a
- * beacon a pair of effects. Those were drawable but dead — the second screen had
- * no way to describe the choice or send it — so opening one on the Thor meant
- * reaching for the top screen. Each panel here is one list and one command.
+ * beacon a pair of effects, an anvil a name. Those were drawable but dead — the
+ * second screen had no way to describe the choice or send it.
+ *
+ * <h2>A band, not a side panel</h2>
+ * These controls used to sit in a column beside the grid, splitting the width
+ * roughly in half. That was the wrong axis to spend. The slot plan is at most 162
+ * texture pixels wide and its cell size is bound by whichever axis runs out
+ * first — so halving the width halved the cell size, and the grid ended up small
+ * with wide empty margins while the panel's own lists had far more room than a
+ * short list needs.
+ *
+ * Across the top instead, every list runs horizontally and scrolls, the band
+ * takes only the height its content needs, and the grid below gets the entire
+ * width. A stonecutter's recipes read as a filmstrip rather than a column, which
+ * also happens to suit a thumb better than a vertical list on a screen this
+ * shape.
+ *
+ * The band wraps its own height, so a beacon (which genuinely needs two rows) can
+ * have them without every other container paying for the space.
  *
  * <h2>Built from the vocabulary that already exists</h2>
- * Every one of these is [MinecraftButton], [Modifier.vanillaSlot] and
- * [MinecraftText] — deliberately, and it's the reason this whole tier needed **no
- * new textures**. Vanilla has bespoke sprites for each of these lists
+ * Every control here is [MinecraftButton], [Modifier.vanillaSlot] and
+ * [MinecraftText] — deliberately, and it's why this whole feature needed **no new
+ * textures**. Vanilla has bespoke sprites for each of these lists
  * (`container/stonecutter/recipe`, `container/enchanting_table/level_1`,
  * `container/beacon/button`), and using them would have meant shipping ~25 more
- * assets to reproduce widgets the app already draws in the game's own style. The
- * information a player needs — which recipe, what it costs, what's locked — is
- * carried by the item icon and the label either way.
+ * assets to reproduce widgets the app already draws in the game's own style.
  *
- * Icons come through the existing `ICON:` request path, so a stonecutter's recipe
- * grid and a villager's trades show real items with no new machinery.
+ * Icons come through the existing `ICON:` request path, so a stonecutter's
+ * recipes and a villager's trades show real items with no new machinery.
  */
 @Composable
-fun ContainerExtrasPanel(
+fun ContainerExtrasBand(
     extras: ContainerExtras,
     syncId: Int,
     fontSheet: MinecraftFontSheet?,
@@ -83,15 +90,18 @@ fun ContainerExtrasPanel(
     onRename: (syncId: Int, name: String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier = modifier.fillMaxSize()) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(ROW_GAP)
+    ) {
         when {
-            extras.enchanting != null -> EnchantingPanel(
+            extras.enchanting != null -> EnchantingRow(
                 offers = extras.enchanting,
                 fontSheet = fontSheet,
                 onPick = { row -> onButton(syncId, row) }
             )
 
-            extras.stonecutter != null -> OptionGrid(
+            extras.stonecutter != null -> OptionStrip(
                 list = extras.stonecutter,
                 title = "Cut",
                 fontSheet = fontSheet,
@@ -100,17 +110,17 @@ fun ContainerExtrasPanel(
                 onPick = { index -> onButton(syncId, index) }
             )
 
-            // Patterns aren't items, so there's nothing to draw a grid of icons
-            // from -- a labelled list is the honest version rather than a grid of
+            // Patterns aren't items, so there's nothing to draw a strip of icons
+            // from -- named buttons are the honest version rather than a row of
             // blanks. See ContainerOption.itemId.
-            extras.loom != null -> OptionList(
+            extras.loom != null -> LabelStrip(
                 list = extras.loom,
                 title = "Pattern",
                 fontSheet = fontSheet,
                 onPick = { index -> onButton(syncId, index) }
             )
 
-            extras.merchant != null -> TradeList(
+            extras.merchant != null -> TradeStrip(
                 trades = extras.merchant,
                 fontSheet = fontSheet,
                 glintTexture = glintTexture,
@@ -118,13 +128,13 @@ fun ContainerExtrasPanel(
                 onPick = { index -> onTrade(syncId, index) }
             )
 
-            extras.beacon != null -> BeaconPanel(
+            extras.beacon != null -> BeaconRows(
                 beacon = extras.beacon,
                 fontSheet = fontSheet,
                 onApply = { primary, secondary -> onBeaconEffects(syncId, primary, secondary) }
             )
 
-            extras.anvil != null -> AnvilPanel(
+            extras.anvil != null -> AnvilRow(
                 anvil = extras.anvil,
                 fontSheet = fontSheet,
                 onRename = { name -> onRename(syncId, name) }
@@ -134,60 +144,63 @@ fun ContainerExtrasPanel(
 }
 
 /**
- * The enchanting table's three offers.
+ * The enchanting table's three offers, side by side.
  *
- * Each row says the enchantment and both costs. A row the game would refuse is
- * disabled rather than hidden, because "you need 3 more levels" is the answer the
- * player came for — hiding the row would just look like the table was broken.
+ * Three is a small fixed number, so they get equal thirds of the width rather
+ * than a scroller — an offer that needed scrolling to reach would be worse than
+ * one that's simply narrow.
  *
  * **The name already carries its level.** `Enchantment.getName(entry, level)` on
- * the mod side returns "Sharpness II", numeral included, so appending one here
- * printed "Sharpness II II". Nothing on this side should be formatting a level.
+ * the mod side returns "Sharpness II", numeral included; appending one here
+ * printed "Sharpness II II". Nothing on this side formats a level.
  *
- * The header is the lapis/level summary rather than the word "Enchant": the
- * control bar is already showing the container's title two lines above, and
- * saying it twice in the same corner was just noise.
+ * A row the game would refuse is disabled rather than hidden, because "you need
+ * 3 more levels" is the answer the player came for — hiding it would just look
+ * like the table was broken.
  */
 @Composable
-private fun ColumnScope.EnchantingPanel(
+private fun EnchantingRow(
     offers: EnchantingOffers,
     fontSheet: MinecraftFontSheet?,
     onPick: (Int) -> Unit
 ) {
-    PanelTitle("Lapis ${offers.lapisCount} - Level ${offers.playerLevel}", fontSheet)
+    BandHeader("Lapis ${offers.lapisCount} - Level ${offers.playerLevel}", fontSheet)
 
-    offers.offers.forEachIndexed { row, offer ->
-        // A row with no offer at all: no item in the slot, or not enough
-        // bookshelves. Drawn as an empty disabled row so the table keeps its
-        // three-row shape rather than collapsing and shifting under the finger.
-        val empty = offer.cost <= 0
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
+    ) {
+        offers.offers.forEachIndexed { row, offer ->
+            // A row with no offer at all: nothing in the slot, or not enough
+            // bookshelves. Kept as an empty disabled cell so the table holds its
+            // three-across shape rather than reflowing under the finger.
+            val empty = offer.cost <= 0
 
-        MinecraftButton(
-            text = if (empty) "-" else offer.name,
-            onClick = { onPick(row) },
-            enabled = offer.available,
-            modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT).padding(bottom = ROW_GAP)
-        )
-
-        if (!empty) {
-            PanelLabel(
-                "${offer.lapisCost} lapis, ${offer.cost} levels",
-                fontSheet,
-                color = if (offer.available) PANEL_TEXT else PANEL_TEXT_DIM
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                MinecraftButton(
+                    text = if (empty) "-" else offer.name,
+                    onClick = { onPick(row) },
+                    enabled = offer.available,
+                    modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT)
+                )
+                if (!empty) {
+                    BandLabel(
+                        "${offer.lapisCost} lapis, ${offer.cost} levels",
+                        fontSheet,
+                        color = if (offer.available) PANEL_TEXT else PANEL_TEXT_DIM
+                    )
+                }
+            }
         }
     }
 }
 
-/**
- * A stonecutter's recipes, as a grid of item icons.
- *
- * A grid rather than a list because these are items and a player recognises the
- * shape of a stair block faster than they read "Stone Brick Stairs" — which is
- * also why vanilla's own stonecutter is a grid.
- */
+/** A stonecutter's recipes, as a horizontal filmstrip of item icons. Icons rather
+ *  than names because a player recognises the shape of a stair block faster than
+ *  they read "Stone Brick Stairs", which is why vanilla's own stonecutter is a
+ *  grid of them. */
 @Composable
-private fun ColumnScope.OptionGrid(
+private fun OptionStrip(
     list: SelectableList,
     title: String,
     fontSheet: MinecraftFontSheet?,
@@ -197,29 +210,25 @@ private fun ColumnScope.OptionGrid(
 ) {
     val gui = LocalMinecraftGui.current
 
-    PanelTitle(title, fontSheet)
-
     if (list.options.isEmpty()) {
-        PanelLabel("Put something in to cut", fontSheet)
+        BandHeader("$title - put something in", fontSheet)
         return
     }
+    BandHeader(title, fontSheet)
 
-    LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = OPTION_CELL),
-        modifier = Modifier.fillMaxSize(),
-        horizontalArrangement = Arrangement.spacedBy(ROW_GAP),
-        verticalArrangement = Arrangement.spacedBy(ROW_GAP)
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
     ) {
-        // The index is the button id, so this deliberately iterates the list as
-        // sent rather than sorting or filtering it (see ContainerOption).
-        items(list.options.size) { index ->
-            val option = list.options[index]
+        // Iterated as sent: the index *is* the button id, so this must never be
+        // sorted or filtered (see ContainerOption).
+        itemsIndexed(list.options) { index, option ->
             Box(
                 modifier = Modifier
                     .size(OPTION_CELL)
                     .vanillaSlot(gui.slot)
-                    // The label is the only text a test or screen reader can find
-                    // here -- the cell's content is a bitmap icon.
+                    // The only text a test or a screen reader can find here --
+                    // the cell's content is a bitmap icon.
                     .semantics { contentDescription = option.label }
                     .clickable { onPick(index) }
             ) {
@@ -234,52 +243,53 @@ private fun ColumnScope.OptionGrid(
                         )
                     }
                 }
-                if (index == list.selected) SlotOverlay(SELECTED_TINT)
+                // A border rather than a wash: the previous 50%-white overlay
+                // obliterated the icon it was marking.
+                if (index == list.selected) SelectionBorder()
             }
         }
     }
 }
 
-/** A loom's patterns, by name — there's no icon to show for a banner pattern. */
+/** A loom's patterns, by name — there is no icon to show for a banner pattern. */
 @Composable
-private fun ColumnScope.OptionList(
+private fun LabelStrip(
     list: SelectableList,
     title: String,
     fontSheet: MinecraftFontSheet?,
     onPick: (Int) -> Unit
 ) {
-    PanelTitle(title, fontSheet)
-
     if (list.options.isEmpty()) {
-        PanelLabel("Add a banner and a dye", fontSheet)
+        BandHeader("$title - add a banner and a dye", fontSheet)
         return
     }
+    BandHeader(title, fontSheet)
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(ROW_GAP)
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
     ) {
-        itemsIndexed(list.options) { index, option: ContainerOption ->
+        itemsIndexed(list.options) { index, option ->
             MinecraftButton(
                 text = option.label,
                 onClick = { onPick(index) },
                 selected = index == list.selected,
-                modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT)
+                modifier = Modifier.height(ROW_HEIGHT)
             )
         }
     }
 }
 
 /**
- * A villager's trades: what it wants, what it gives, and whether it's out.
+ * A villager's trades, as horizontal cards.
  *
- * Tapping a row selects the trade, which moves the container's own cost and
- * result slots — so the actual exchange still happens by taking the result out of
- * the slot grid beside this. That split is vanilla's, not a shortcut: selecting a
- * trade and completing it are two different actions in game too.
+ * Tapping one selects the trade, which moves the container's own cost and result
+ * slots — the exchange itself still happens by taking the result out of the grid
+ * below. That split is vanilla's, not a shortcut: selecting a trade and
+ * completing it are two different actions in game too.
  */
 @Composable
-private fun ColumnScope.TradeList(
+private fun TradeStrip(
     trades: MerchantTrades,
     fontSheet: MinecraftFontSheet?,
     glintTexture: Bitmap?,
@@ -288,48 +298,52 @@ private fun ColumnScope.TradeList(
 ) {
     val gui = LocalMinecraftGui.current
 
-    PanelTitle(if (trades.leveled) "Trades - ${trades.experience} xp" else "Trades", fontSheet)
-
+    BandHeader(
+        if (trades.leveled) "Trades - ${trades.experience} xp" else "Trades",
+        fontSheet
+    )
     if (trades.trades.isEmpty()) {
-        PanelLabel("No trades", fontSheet)
+        BandLabel("No trades", fontSheet)
         return
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(ROW_GAP)
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP * 2)
     ) {
         itemsIndexed(trades.trades) { index, trade ->
             Row(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .height(TRADE_ROW_HEIGHT)
+                    .height(TRADE_CELL + ROW_GAP * 2)
                     // Out of stock stays on screen and greyed. Removing the row
-                    // would renumber every trade below it while the player was
-                    // looking at it, and the indices are what get sent.
+                    // would renumber every trade after it while the player was
+                    // looking at it, and the index is what gets sent.
                     .background(if (trade.disabled) TRADE_DISABLED else Color.Transparent)
+                    .padding(horizontal = ROW_GAP)
                     .semantics { contentDescription = "Trade ${index + 1}" }
                     .clickable(enabled = !trade.disabled) { onPick(index) },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 TradeSlot(trade.firstCost, gui.slot, fontSheet, glintTexture, itemIcon)
-                TradeSlot(trade.secondCost, gui.slot, fontSheet, glintTexture, itemIcon)
-                PanelLabel(">", fontSheet)
+                if (trade.secondCost.itemId != InventoryMoves.AIR_ITEM_ID) {
+                    TradeSlot(trade.secondCost, gui.slot, fontSheet, glintTexture, itemIcon)
+                }
+                // ASCII only: the bitmap font sheet covers 0x00-0xFF, and an
+                // arrow glyph came out as a literal '?'.
+                BandLabel(">", fontSheet)
                 TradeSlot(trade.sell, gui.slot, fontSheet, glintTexture, itemIcon)
-                Spacer(modifier = Modifier.width(ROW_GAP))
-                if (trade.disabled) PanelLabel("out", fontSheet, PANEL_TEXT_DIM)
+                if (trade.disabled) BandLabel("out", fontSheet, PANEL_TEXT_DIM)
             }
         }
     }
 }
 
-/** One stack in a trade row. An empty one still draws its cell, so a
- *  one-item trade lines up with a two-item one above it. */
+/** One stack in a trade card. */
 @Composable
 private fun TradeSlot(
     stack: HotbarSlot,
-    slotTexture: androidx.compose.ui.graphics.ImageBitmap?,
+    slotTexture: ImageBitmap?,
     fontSheet: MinecraftFontSheet?,
     glintTexture: Bitmap?,
     itemIcon: (String) -> Bitmap?
@@ -352,158 +366,186 @@ private fun TradeSlot(
 /**
  * The beacon's two effect choices.
  *
- * <h2>Both effects go at once, and the selection is local until Apply</h2>
- * The packet behind this carries both choices together — there is no way to change
- * one and leave the other — so the panel holds a pending pair and sends it on
- * Apply. Sending on each tap would work but would fire a packet per tap and, worse,
- * would clear the secondary effect the moment the player touched the primary.
+ * The one container that genuinely needs two rows, which is why the band wraps
+ * its height rather than fixing it: primary effects scroll along the first, and
+ * the secondary pair plus Apply sit on the second.
+ *
+ * **Both effects go at once and the selection is local until Apply.** The packet
+ * behind this carries the pair, so sending on each tap would fire a packet per tap
+ * and — worse — clear the secondary the moment the player touched the primary.
  *
  * Locked options are shown disabled with the level they need rather than omitted,
- * so a player with a half-built beacon can see what building it out would buy.
+ * so a player with a half-built beacon can see what finishing it would buy.
  */
 @Composable
-private fun ColumnScope.BeaconPanel(
+private fun BeaconRows(
     beacon: BeaconState,
     fontSheet: MinecraftFontSheet?,
     onApply: (String?, String?) -> Unit
 ) {
-    // Keyed on what the server says, so a change made on the top screen -- or by
-    // another player -- replaces the pending selection rather than being
-    // overwritten by it on the next Apply.
+    // Keyed on what the server says, so a change made on the top screen replaces
+    // the pending selection rather than being overwritten by it on next Apply.
     var primary by remember(beacon.primary, beacon.level) { mutableStateOf(beacon.primary) }
     var secondary by remember(beacon.secondary, beacon.level) { mutableStateOf(beacon.secondary) }
 
-    PanelTitle("Beacon - level ${beacon.level}", fontSheet)
+    BandHeader(
+        "Beacon - level ${beacon.level}" +
+            if (beacon.hasPayment) "" else " - needs payment",
+        fontSheet
+    )
 
-    if (!beacon.hasPayment) {
-        PanelLabel("Needs an ingot, gold, emerald or diamond", fontSheet, PANEL_TEXT_DIM)
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxWidth().weight(1f),
-        verticalArrangement = Arrangement.spacedBy(ROW_GAP)
+    LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
     ) {
-        item { PanelLabel("Primary", fontSheet) }
         items(beacon.primaryOptions) { effect ->
             val unlocked = beacon.level >= effect.tier
             MinecraftButton(
-                text = if (unlocked) effect.name else "${effect.name} (lvl ${effect.tier})",
+                text = if (unlocked) effect.name else "${effect.name} (${effect.tier})",
                 onClick = { primary = effect.id },
                 enabled = unlocked,
                 selected = primary == effect.id,
-                modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT)
-            )
-        }
-
-        item { PanelLabel("Secondary", fontSheet) }
-        items(beacon.secondaryOptions) { effect ->
-            val unlocked = beacon.level >= effect.tier
-            MinecraftButton(
-                text = if (unlocked) effect.name else "${effect.name} (lvl ${effect.tier})",
-                onClick = { secondary = effect.id },
-                enabled = unlocked,
-                selected = secondary == effect.id,
-                modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT)
-            )
-        }
-        // Vanilla's second secondary option: spend the payment on doubling the
-        // primary instead of adding regeneration. It's the primary's own id in
-        // both slots, which is why it isn't in the effect list the mod sends.
-        item {
-            MinecraftButton(
-                text = "Amplify primary",
-                onClick = { secondary = primary },
-                enabled = beacon.level >= AMPLIFY_LEVEL && primary != null,
-                selected = secondary != null && secondary == primary,
-                modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT)
+                modifier = Modifier.height(ROW_HEIGHT)
             )
         }
     }
 
-    MinecraftButton(
-        text = "Apply",
-        onClick = { onApply(primary, secondary) },
-        // Vanilla's own gate: no payment, no effect change.
-        enabled = beacon.hasPayment && primary != null,
-        modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT)
-    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        beacon.secondaryOptions.forEach { effect ->
+            val unlocked = beacon.level >= effect.tier
+            MinecraftButton(
+                text = if (unlocked) effect.name else "${effect.name} (${effect.tier})",
+                onClick = { secondary = effect.id },
+                enabled = unlocked,
+                selected = secondary != null && secondary == effect.id,
+                modifier = Modifier.height(ROW_HEIGHT)
+            )
+        }
+        // Vanilla's second secondary option: spend the payment on doubling the
+        // primary rather than adding regeneration. It's the primary's own id in
+        // both slots, which is why the mod doesn't list it as an effect.
+        MinecraftButton(
+            text = "Amplify",
+            onClick = { secondary = primary },
+            enabled = beacon.level >= AMPLIFY_LEVEL && primary != null,
+            selected = secondary != null && secondary == primary,
+            modifier = Modifier.height(ROW_HEIGHT)
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        MinecraftButton(
+            text = "Apply",
+            onClick = { onApply(primary, secondary) },
+            // Vanilla's own gate: no payment, no effect change.
+            enabled = beacon.hasPayment && primary != null,
+            modifier = Modifier.height(ROW_HEIGHT)
+        )
+    }
 }
 
 /**
- * The anvil's rename field and its price.
+ * The anvil: a name field, the price, and a keyboard only while typing.
  *
- * The keyboard is the app's own [ChatKeyboard], not an IME, for the reason that
+ * **The keyboard is no longer part of the panel.** It used to be pinned open
+ * underneath, which cost four rows of height permanently and left the grid with
+ * half a screen — for a control the player touches once per repair. Now the field
+ * sits in the band and the keyboard appears under it only after the field is
+ * tapped, so the grid keeps the space the rest of the time.
+ *
+ * It is still the app's own [ChatKeyboard] rather than an IME, for the reason that
  * component exists: Android shows a soft keyboard for a presentation display on
- * the *primary* screen, which on this device is the one running the game. It's
- * reused unchanged — its callbacks were already generic — so the anvil gets the
- * same typing surface as chat with no second keyboard to maintain.
+ * the *primary* screen, which on this device is the one running the game.
  *
- * The name is sent as it's typed rather than on a confirm button, because the
- * anvil's *price* depends on it and the player needs to see the cost for the name
- * they've actually written. That is also what vanilla does.
+ * The name goes out as it's typed rather than on a confirm, because the anvil's
+ * *price* depends on it and that's what the player needs to see. Vanilla does the
+ * same.
  */
 @Composable
-private fun ColumnScope.AnvilPanel(
+private fun AnvilRow(
     anvil: AnvilState,
     fontSheet: MinecraftFontSheet?,
     onRename: (String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
+    var typing by remember { mutableStateOf(false) }
 
     fun update(next: String) {
         name = next
         onRename(next)
     }
 
-    PanelTitle("Repair & Name", fontSheet)
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(ROW_HEIGHT)
-            .background(FIELD_BACKGROUND)
-            .padding(horizontal = 4.dp),
-        contentAlignment = Alignment.CenterStart
+    Row(
+        modifier = Modifier.fillMaxWidth().height(ROW_HEIGHT),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
     ) {
-        PanelLabel(name.ifEmpty { "(item name)" }, fontSheet,
-            if (name.isEmpty()) PANEL_TEXT_DIM else Color.White)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxSize()
+                .background(FIELD_BACKGROUND)
+                .clickable { typing = !typing }
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.CenterStart
+        ) {
+            BandLabel(
+                name.ifEmpty { "Tap to name" },
+                fontSheet,
+                if (name.isEmpty()) PANEL_TEXT_DIM else Color.White
+            )
+        }
+
+        // Zero cost with no result means "nothing to do", not "free".
+        BandLabel(
+            when {
+                !anvil.hasResult -> "No result"
+                anvil.levelCost <= 0 -> "Free"
+                else -> "${anvil.levelCost} levels"
+            },
+            fontSheet
+        )
+
+        MinecraftButton(
+            text = if (typing) "Done" else "Name",
+            onClick = { typing = !typing },
+            selected = typing,
+            modifier = Modifier.height(ROW_HEIGHT)
+        )
     }
 
-    Spacer(modifier = Modifier.height(ROW_GAP))
+    if (typing) {
+        ChatKeyboard(
+            onType = { typed -> update(name + typed) },
+            onBackspace = { if (name.isNotEmpty()) update(name.dropLast(1)) },
+            // The name is already sent as it's typed, so there is nothing left
+            // to transmit -- this only puts the keyboard away.
+            onSend = { typing = false },
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
 
-    // Vanilla shows the cost in red when the player can't afford it; here the
-    // level count is enough, since the result slot beside this already refuses
-    // the take. Zero cost with no result means "nothing to do", not "free".
-    PanelLabel(
-        when {
-            !anvil.hasResult -> "No result"
-            anvil.levelCost <= 0 -> "Free"
-            else -> "Cost: ${anvil.levelCost} levels"
-        },
-        fontSheet
-    )
-
-    Spacer(modifier = Modifier.height(ROW_GAP))
-
-    ChatKeyboard(
-        onType = { typed -> update(name + typed) },
-        onBackspace = { if (name.isNotEmpty()) update(name.dropLast(1)) },
-        // The keyboard's "send" is the commit here. The name has already been
-        // sent as it was typed, so this only has to clear the field's focus --
-        // there's nothing left to transmit.
-        onSend = { },
-        modifier = Modifier.fillMaxWidth()
+/** Vanilla's slot highlight is a wash, which works over an empty cell and ruins a
+ *  full one. A border marks the selected recipe without hiding what was chosen. */
+@Composable
+private fun SelectionBorder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .vanillaSlotHighlight()
     )
 }
 
 @Composable
-private fun PanelTitle(text: String, fontSheet: MinecraftFontSheet?) {
-    PanelLabel(text, fontSheet, Color.White, TITLE_PIXEL)
-    Spacer(modifier = Modifier.height(ROW_GAP))
+private fun BandHeader(text: String, fontSheet: MinecraftFontSheet?) {
+    BandLabel(text, fontSheet, Color.White, TITLE_PIXEL)
 }
 
 @Composable
-private fun PanelLabel(
+private fun BandLabel(
     text: String,
     fontSheet: MinecraftFontSheet?,
     color: Color = PANEL_TEXT,
@@ -518,8 +560,8 @@ private fun PanelLabel(
             style = MinecraftTextStyle.SHADOW
         )
     } else {
-        // No font sheet yet (the bundle is still streaming). Plain Compose text
-        // rather than nothing, so the panel is usable on a fresh connection.
+        // The asset bundle is still streaming in. Plain Compose text rather than
+        // nothing, so the band is usable on a fresh connection.
         androidx.compose.material3.Text(text = text, color = color)
     }
 }
@@ -528,17 +570,14 @@ private fun PanelLabel(
  *  is `EFFECTS_BY_LEVEL` entry 3, i.e. a full four-layer pyramid. */
 private const val AMPLIFY_LEVEL = 4
 
-private val ROW_HEIGHT = 24.dp
+private val ROW_HEIGHT = 26.dp
 private val ROW_GAP = 3.dp
-private val OPTION_CELL = 36.dp
+private val OPTION_CELL = 38.dp
 private val TRADE_CELL = 26.dp
-private val TRADE_ROW_HEIGHT = 30.dp
-private val TITLE_PIXEL = 2.dp
+private val TITLE_PIXEL = 1.75.dp
 private val LABEL_PIXEL = 1.5.dp
 
-/** Vanilla's GUI label grey, the same one the Items tab's control bar uses. */
 private val PANEL_TEXT = Color(0xFFDDDDDD)
-private val PANEL_TEXT_DIM = Color(0xFF808080)
-private val SELECTED_TINT = Color(0x80FFFFFF)
+private val PANEL_TEXT_DIM = Color(0xFF8A8A8A)
 private val TRADE_DISABLED = Color(0x40000000)
 private val FIELD_BACKGROUND = Color(0xFF000000)

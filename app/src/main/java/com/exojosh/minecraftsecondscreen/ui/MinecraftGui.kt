@@ -447,3 +447,29 @@ fun Modifier.vanillaSlot(slot: ImageBitmap?): Modifier = drawBehind {
 fun SlotOverlay(color: Color, modifier: Modifier = Modifier) {
     Canvas(modifier = modifier.fillMaxSize()) { drawRect(color) }
 }
+
+/**
+ * Marks a slot as the chosen one, by outlining it rather than washing over it.
+ *
+ * [SlotOverlay] is the right treatment for a transient state on a cell that is
+ * usually empty — a drag source, a painted distribute target. It is the wrong one
+ * for a *selection* that sits over a full cell indefinitely: a 50%-white wash over
+ * a stonecutter's chosen recipe obliterated the icon, so the one cell telling the
+ * player what they had picked was the one they couldn't read.
+ *
+ * Two pixels of vanilla's own highlight white, inset by nothing so it reads as the
+ * cell's own border rather than as something floating inside it.
+ */
+fun Modifier.vanillaSlotHighlight(): Modifier = drawBehind {
+    val pixel = (size.width / SLOT_PIXELS).coerceAtLeast(1f)
+    val thickness = pixel * 2
+    drawRect(SELECTION_BORDER, Offset.Zero, Size(size.width, thickness))
+    drawRect(SELECTION_BORDER, Offset(0f, size.height - thickness),
+        Size(size.width, thickness))
+    drawRect(SELECTION_BORDER, Offset.Zero, Size(thickness, size.height))
+    drawRect(SELECTION_BORDER, Offset(size.width - thickness, 0f),
+        Size(thickness, size.height))
+}
+
+/** Vanilla's slot highlight white, used at full opacity for a border. */
+private val SELECTION_BORDER = Color(0xFFFFFFFF)

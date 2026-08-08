@@ -50,17 +50,6 @@ private val SCREEN_PADDING = 4.dp
 private val PANEL_INSET = 6.dp
 private val CONTROL_BAR_HEIGHT = 40.dp
 
-/**
- * How the width splits between the slot grid and a container's controls.
- *
- * Weighted rather than a fixed dp for the panel, so the grid keeps a predictable
- * share on any screen. Slightly favouring the grid: it's the part every container
- * has, and it's the part that's height-bound and quantised to whole texture pixels
- * — a few dp back can be worth an entire step of cell size, which the panel's
- * scrolling lists don't care about at all.
- */
-private const val GRID_WEIGHT = 1.15f
-private const val EXTRAS_WEIGHT = 1f
 
 private val SLOT_BLOCKED = Color(0x55FF4444)
 private val DRAG_SOURCE_TINT = Color(0x40FFFFFF)
@@ -181,51 +170,43 @@ fun InventoryScreen(
                 }
             )
 
-            // The grid and, for the containers that have one, their controls
-            // side by side.
+            // A container's own controls go in a band across the top, and the
+            // grid gets the full width underneath.
             //
-            // Beside rather than below, because the two axes are spent very
-            // differently here: the slot plan is at most 162 texture pixels wide
-            // against a panel that's far wider than it is tall, so horizontal
-            // space is the slack and vertical space is what the grid is
-            // competing for. Stacking the panel underneath would take height off
-            // a grid that's already height-bound and leave the width unused.
-            //
-            // The grid needs no special handling for the narrower box: it scales
-            // to whatever it's given.
-            val extras = state.extras
-
-            Row(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                SlotGrid(
-                    state = state,
-                    plan = plan,
-                    moveMode = moveMode,
+            // These used to sit in a column beside the grid, splitting the width
+            // in half, and that was the wrong axis to spend. The slot plan is at
+            // most 162 texture pixels wide and its cell size is bound by
+            // whichever axis runs out first — so halving the width halved the
+            // cells, leaving a small grid inside wide empty margins while short
+            // lists had far more room than they needed. The band takes only the
+            // height its content wants, so the cost is paid in the dimension
+            // that has some to spare.
+            state.extras?.let { extras ->
+                ContainerExtrasBand(
+                    extras = extras,
+                    syncId = state.syncId,
                     fontSheet = fontSheet,
                     glintTexture = glintTexture,
                     itemIcon = itemIcon,
-                    iconProvider = iconProvider,
-                    onSlotClick = onSlotClick,
-                    modifier = Modifier.weight(if (extras == null) 1f else GRID_WEIGHT).fillMaxHeight()
+                    onButton = onButton,
+                    onTrade = onTrade,
+                    onBeaconEffects = onBeaconEffects,
+                    onRename = onRename,
+                    modifier = Modifier.padding(bottom = PANEL_INSET)
                 )
-
-                if (extras != null) {
-                    ContainerExtrasPanel(
-                        extras = extras,
-                        syncId = state.syncId,
-                        fontSheet = fontSheet,
-                        glintTexture = glintTexture,
-                        itemIcon = itemIcon,
-                        onButton = onButton,
-                        onTrade = onTrade,
-                        onBeaconEffects = onBeaconEffects,
-                        onRename = onRename,
-                        modifier = Modifier
-                            .weight(EXTRAS_WEIGHT)
-                            .fillMaxHeight()
-                            .padding(start = PANEL_INSET)
-                    )
-                }
             }
+
+            SlotGrid(
+                state = state,
+                plan = plan,
+                moveMode = moveMode,
+                fontSheet = fontSheet,
+                glintTexture = glintTexture,
+                itemIcon = itemIcon,
+                iconProvider = iconProvider,
+                onSlotClick = onSlotClick,
+                modifier = Modifier.fillMaxWidth().weight(1f)
+            )
         }
     }
 }
