@@ -131,6 +131,27 @@ Full protocol spec (message shapes, field meanings, command codes) is in `thor-h
   - `MinecraftButton` carries a `contentDescription`: its label is usually a `Canvas` of bitmap glyphs, which leaves no text for a test or a screen reader to find. It also uses `indication = null` — a Material ripple over pixel art reads as a rendering fault, and the sprite swap is the press feedback.
 - `ui/InputGridScreen` — 3×3 grid of buttons, each pressing a key binding by id (`BIND:<id>`). **Every button is data**, driven by `InputSettings` and labelled from the mod's binding list; it used to be a hardcoded list of codes matched against a hardcoded table in the mod, and those two lists drifted (an "R" button doing an F key's job, an "L" button wired to nothing). A slot whose id the mod hasn't described — the list hasn't arrived yet, or a mod that owned it was removed — falls back to the id's last segment rather than rendering blank.
 
+## The side-by-side container layout, kept on a branch
+
+`feat/container-panels-side-by-side` holds the first version of the container
+controls, where they sat in a **column beside the slot grid** rather than in a band
+above it. It's kept deliberately, not abandoned — the layout is a judgement call
+about how to spend a 1240x1080 panel, and the two are worth being able to compare
+rather than argue about from memory.
+
+What the side-by-side version got wrong, and why the band replaced it: the panel
+took roughly half the width, and the grid's cell size is bound by whichever axis
+runs out first. On this display that made the scale step fall from 3.95 to 3
+device pixels per texture pixel (it floors to a whole pixel for bevel crispness),
+so the grid came out small inside wide empty margins — while a nine-entry recipe
+list had far more room than it needed. The anvil was the extreme case: its
+keyboard was pinned open in the panel, so a block whose whole interaction is
+"type a name and take the result" showed a half-width inventory under a keyboard
+nobody was using.
+
+Both branches carry the same mod-side commit; the layout is entirely app-side, so
+`AynThorSecondScreen` has only `feat/container-panels`.
+
 ## Handoff doc vs. current code
 
 `thor-hud-handoff.md` is accurate on protocol and overall architecture, but its file/class inventory has drifted from the current tree — don't assume a class it names still exists or is still missing without checking:
