@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -135,9 +136,55 @@ data class ChatMessage(val id: Long, val segments: List<ChatSegment>) {
     val plainText: String get() = segments.joinToString("") { it.text }
 }
 
-/** One inventory slot: what's in it, and whether it will accept what's
- *  currently on the cursor. */
-data class ContainerSlot(val stack: HotbarSlot, val mayPlace: Boolean)
+/**
+ * One inventory slot: what's in it, where it sits, and what may be done with it.
+ *
+ * [x]/[y] are vanilla's own GUI coordinates for the slot's 16x16 item area, as
+ * the game's handler placed them — the 18x18 cell drawn around it starts one
+ * pixel up and to the left. They're what lets `ContainerLayout` draw a furnace
+ * as a furnace instead of as three cells in a row, with no per-container table
+ * on this side. `-1` means the mod build predates them.
+ */
+data class ContainerSlot(
+    val stack: HotbarSlot,
+    val mayPlace: Boolean,
+    val x: Int = -1,
+    val y: Int = -1,
+    /**
+     * Sprite id of vanilla's empty-slot placeholder — the sword outline in a
+     * grindstone, the flame in a brewing stand's fuel slot. Null for most slots.
+     * Resolve it through [ResourcePackIconProvider.getSpriteBitmap].
+     */
+    val background: String? = null,
+    /** False only when the handler has switched the slot off: a crafter's
+     *  disabled cell, a horse with no chest. */
+    val enabled: Boolean = true
+)
+
+/**
+ * How far along whatever the open container is doing has got, in the pixel
+ * counts vanilla itself would draw.
+ *
+ * The mod quantises to pixels rather than sending raw progress, because this
+ * whole message is broadcast on change and a raw cook progress changes every
+ * tick — see `ContainerRelay.ProgressState`. Null fields mean the container has
+ * no such indicator.
+ */
+data class ContainerProgress(
+    /** Furnace family: the burn arrow's width, 0..24. */
+    val cookPixels: Int? = null,
+    /** Furnace family: the flame's height, 0..14. Zero means "not lit" — vanilla
+     *  always draws at least one row while burning. */
+    val litPixels: Int? = null,
+    /** Brewing stand: the fuel bar's width, 0..18. */
+    val fuelPixels: Int? = null,
+    /** Brewing stand: the brew arrow's height, 0..28. */
+    val brewPixels: Int? = null,
+    /** Brewing stand: whether it's brewing. The bubble column's phase is
+     *  deliberately not sent — this app animates it from its own frame clock,
+     *  the same split as the enchant glint. */
+    val brewing: Boolean = false
+)
 
 /**
  * The open screen handler, as the mod reports it.
@@ -157,9 +204,116 @@ data class ContainerSlot(val stack: HotbarSlot, val mayPlace: Boolean)
  * close between this arriving and a finger landing, and "slot 3" then means
  * something completely different.
  */
+/**
+ * One selectable thing in a container's list: a stonecutter recipe or a loom
+ * pattern.
+ *
+ * [itemId] is present for a stonecutter, whose options are real items and so can
+ * be drawn as icons through the existing `ICON:` path. It's null for a loom,
+ * whose patterns aren't items at all — vanilla renders those previews off a
+ * banner model — so those show as names. The index in the list **is** the button
+ * id, so never sort or filter these.
+ */
+data class ContainerOption(val label: String, val itemId: String?)
+
+/** A stonecutter's recipes or a loom's patterns, with the current choice.
+ *  [selected] is -1 when nothing is chosen. */
+data class SelectableList(val options: List<ContainerOption>, val selected: Int)
+
+/**
+ * One of the enchanting table's three offers.
+ *
+ * [name] is the enchantment's real name, which vanilla hides behind a hover
+ * tooltip and prints as an obfuscated galactic phrase on the row itself. There's
+ * no hover on a touch screen and the information isn't secret, so the mod sends
+ * it plainly — see `ContainerExtras.Offer`. Empty for a row with no offer.
+ *
+ * [available] is vanilla's own enable rule (enough lapis, enough levels, an offer
+ * present, or creative), computed mod-side so the app greys exactly what the game
+ * would refuse.
+ */
+data class EnchantOffer(
+    val level: Int,
+    val cost: Int,
+    val lapisCost: Int,
+    val name: String,
+    val available: Boolean
+)
+
+data class EnchantingOffers(
+    val offers: List<EnchantOffer>,
+    val lapisCount: Int,
+    val playerLevel: Int
+)
+
+/** One villager trade. [secondCost] is empty for the many trades that want one
+ *  item. [disabled] is out-of-stock, greyed rather than hidden — removing the row
+ *  would renumber every trade below it while the player was looking at it. */
+data class VillagerTrade(
+    val firstCost: HotbarSlot,
+    val secondCost: HotbarSlot,
+    val sell: HotbarSlot,
+    val disabled: Boolean,
+    val uses: Int,
+    val maxUses: Int
+)
+
+data class MerchantTrades(
+    val trades: List<VillagerTrade>,
+    val experience: Int,
+    val levelProgress: Int,
+    val leveled: Boolean
+)
+
+/** One beacon effect. [tier] is the beacon level it needs, so a locked option can
+ *  be shown as locked rather than omitted — leaving it out would have the player
+ *  wondering what the upper rows are for. */
+data class BeaconEffect(val id: String, val name: String, val tier: Int)
+
+data class BeaconState(
+    val primaryOptions: List<BeaconEffect>,
+    val secondaryOptions: List<BeaconEffect>,
+    val primary: String?,
+    val secondary: String?,
+    val level: Int,
+    val hasPayment: Boolean
+)
+
+/** The anvil's XP cost and whether it has a result to take. */
+data class AnvilState(val levelCost: Int, val hasResult: Boolean)
+
+/**
+ * The part of a container that isn't slots.
+ *
+ * One nullable field per kind rather than a `kind` discriminator plus a union of
+ * fields: the wire form says what it is by which key is present, and neither side
+ * has a switch that can disagree with the data. Null for the great majority of
+ * containers, which have nothing beyond their slots.
+ */
+data class ContainerExtras(
+    val enchanting: EnchantingOffers? = null,
+    val stonecutter: SelectableList? = null,
+    val loom: SelectableList? = null,
+    val merchant: MerchantTrades? = null,
+    val beacon: BeaconState? = null,
+    val anvil: AnvilState? = null
+) {
+    /** Whether there's anything at all to draw a panel for. Guards against a
+     *  future kind arriving from a newer mod build that this app can't render:
+     *  an `extras` object with every known field absent must read as "nothing",
+     *  not as an empty panel taking half the screen. */
+    val isEmpty: Boolean
+        get() = enchanting == null && stonecutter == null && loom == null &&
+            merchant == null && beacon == null && anvil == null
+}
+
 data class ContainerState(
     val syncId: Int,
     val handlerType: String?,
+    /** The container's name as the game titles it ("Furnace", or a renamed
+     *  chest's own name). Null for the player's own handler, which the mod
+     *  deliberately leaves unlabelled — see `ContainerRelay.ScreenHandlerState`. */
+    val title: String? = null,
     /** What's "on the mouse". Non-empty means a move is half-finished — it has
      *  to be drawn, or the player can't see where their item went. */
     val cursor: HotbarSlot,
@@ -167,7 +321,9 @@ data class ContainerState(
     val playerStart: Int,
     val hotbarStart: Int,
     val armorStart: Int,
-    val offhandIndex: Int
+    val offhandIndex: Int,
+    val progress: ContainerProgress? = null,
+    val extras: ContainerExtras? = null
 ) {
     val isPlayerInventory: Boolean get() = armorStart >= 0
     val hasCursorStack: Boolean get() = cursor.itemId != "minecraft:air" && cursor.count > 0
@@ -175,6 +331,17 @@ data class ContainerState(
     /** Slots belonging to the open container rather than to the player. Empty
      *  for the player's own inventory. */
     val containerRange: IntRange get() = 0 until playerStart
+
+    /**
+     * Whether the mod sent slot coordinates, i.e. whether the container region
+     * can be laid out in vanilla's own shape.
+     *
+     * Checked against the *container* slots rather than all of them, because
+     * that's the only region whose layout depends on it, and a build old enough
+     * to omit them should fall back for exactly that region and nothing else.
+     */
+    val hasSlotPositions: Boolean
+        get() = containerRange.any { slots.getOrNull(it)?.x?.let { x -> x >= 0 } == true }
 }
 
 data class HudState(
@@ -655,7 +822,20 @@ class HudRepository(private val scope: CoroutineScope) {
                 add(
                     ContainerSlot(
                         stack = parseSlot(entry.getJSONObject("stack")),
-                        mayPlace = entry.optBoolean("mayPlace", true)
+                        mayPlace = entry.optBoolean("mayPlace", true),
+                        // -1 rather than 0 for "absent": (0,0) is a position a
+                        // handler could legitimately place a slot at, so a
+                        // zero default would read as a real coordinate and
+                        // stack every slot of an old mod build's container in
+                        // the top-left corner.
+                        x = entry.optInt("x", -1),
+                        y = entry.optInt("y", -1),
+                        // The mod omits the field entirely for the great
+                        // majority of slots, which have no placeholder.
+                        background = entry.optString("background").ifEmpty { null },
+                        // Sent inverted, and only when true: "disabled" is the
+                        // exception worth a field, "enabled" is the default.
+                        enabled = !entry.optBoolean("disabled", false)
                     )
                 )
             }
@@ -664,14 +844,115 @@ class HudRepository(private val scope: CoroutineScope) {
         _container.value = ContainerState(
             syncId = json.getInt("syncId"),
             handlerType = if (json.isNull("handlerType")) null else json.optString("handlerType"),
+            title = if (json.isNull("title")) null else json.optString("title").ifEmpty { null },
             cursor = parseSlot(json.getJSONObject("cursor")),
             slots = slots,
             playerStart = json.getInt("playerStart"),
             hotbarStart = json.getInt("hotbarStart"),
             armorStart = json.getInt("armorStart"),
-            offhandIndex = json.getInt("offhandIndex")
+            offhandIndex = json.getInt("offhandIndex"),
+            progress = json.optJSONObject("progress")?.let(::parseContainerProgress),
+            extras = json.optJSONObject("extras")
+                ?.let(::parseContainerExtras)
+                // An extras object with nothing this build understands reads as
+                // no extras at all, rather than as an empty panel eating half the
+                // screen -- which is what a newer mod adding a sixth kind would
+                // otherwise do here.
+                ?.takeUnless { it.isEmpty }
         )
     }
+
+    /** Each kind is absent unless the open handler is that kind, so every field is
+     *  a nullable lookup rather than a branch on a discriminator. */
+    private fun parseContainerExtras(json: JSONObject) = ContainerExtras(
+        enchanting = json.optJSONObject("enchanting")?.let { obj ->
+            EnchantingOffers(
+                offers = obj.optJSONArray("offers").mapObjects { offer ->
+                    EnchantOffer(
+                        level = offer.optInt("level"),
+                        cost = offer.optInt("cost"),
+                        lapisCost = offer.optInt("lapisCost"),
+                        name = offer.optString("name"),
+                        available = offer.optBoolean("available", false)
+                    )
+                },
+                lapisCount = obj.optInt("lapisCount"),
+                playerLevel = obj.optInt("playerLevel")
+            )
+        },
+        stonecutter = json.optJSONObject("stonecutter")?.let(::parseSelectableList),
+        loom = json.optJSONObject("loom")?.let(::parseSelectableList),
+        merchant = json.optJSONObject("merchant")?.let { obj ->
+            MerchantTrades(
+                trades = obj.optJSONArray("trades").mapObjects { trade ->
+                    VillagerTrade(
+                        firstCost = parseSlot(trade.getJSONObject("firstCost")),
+                        secondCost = parseSlot(trade.getJSONObject("secondCost")),
+                        sell = parseSlot(trade.getJSONObject("sell")),
+                        disabled = trade.optBoolean("disabled", false),
+                        uses = trade.optInt("uses"),
+                        maxUses = trade.optInt("maxUses")
+                    )
+                },
+                experience = obj.optInt("experience"),
+                levelProgress = obj.optInt("levelProgress"),
+                leveled = obj.optBoolean("leveled", false)
+            )
+        },
+        beacon = json.optJSONObject("beacon")?.let { obj ->
+            BeaconState(
+                primaryOptions = obj.optJSONArray("primaryOptions").mapObjects(::parseBeaconEffect),
+                secondaryOptions = obj.optJSONArray("secondaryOptions").mapObjects(::parseBeaconEffect),
+                // Null is a real state -- a beacon with nothing chosen yet.
+                primary = if (obj.isNull("primary")) null else obj.optString("primary"),
+                secondary = if (obj.isNull("secondary")) null else obj.optString("secondary"),
+                level = obj.optInt("level"),
+                hasPayment = obj.optBoolean("hasPayment", false)
+            )
+        },
+        anvil = json.optJSONObject("anvil")?.let { obj ->
+            AnvilState(
+                levelCost = obj.optInt("levelCost"),
+                hasResult = obj.optBoolean("hasResult", false)
+            )
+        }
+    )
+
+    private fun parseSelectableList(json: JSONObject) = SelectableList(
+        options = json.optJSONArray("options").mapObjects { option ->
+            ContainerOption(
+                label = option.optString("label"),
+                // Absent for a loom's patterns, which aren't items.
+                itemId = option.optString("itemId").ifEmpty { null }
+            )
+        },
+        selected = json.optInt("selected", -1)
+    )
+
+    private fun parseBeaconEffect(json: JSONObject) = BeaconEffect(
+        id = json.optString("id"),
+        name = json.optString("name"),
+        tier = json.optInt("tier")
+    )
+
+    /** A null array reads as empty — the mod omits a list it has nothing for, and
+     *  every caller here wants "no entries" rather than a throw. */
+    private inline fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> {
+        if (this == null) return emptyList()
+        return (0 until length()).map { transform(getJSONObject(it)) }
+    }
+
+    /** Absent fields mean "this container has no such indicator", so every one
+     *  of them stays null rather than defaulting to zero — a furnace with a
+     *  `cookPixels` of 0 is idle, which is a different thing from a brewing
+     *  stand that has no cook arrow at all. */
+    private fun parseContainerProgress(json: JSONObject) = ContainerProgress(
+        cookPixels = if (json.has("cookPixels")) json.optInt("cookPixels") else null,
+        litPixels = if (json.has("litPixels")) json.optInt("litPixels") else null,
+        fuelPixels = if (json.has("fuelPixels")) json.optInt("fuelPixels") else null,
+        brewPixels = if (json.has("brewPixels")) json.optInt("brewPixels") else null,
+        brewing = json.optBoolean("brewing", false)
+    )
 
     /**
      * Clicks an inventory slot, exactly as a mouse would.
@@ -691,6 +972,34 @@ class HudRepository(private val scope: CoroutineScope) {
      */
     fun sendSlotClick(syncId: Int, slotId: Int, button: Int = 0, action: String = "PICKUP") =
         sendCommand("SLOT:$syncId,$slotId,$button,$action")
+
+    /**
+     * The container commands that aren't slot clicks.
+     *
+     * The strings themselves are built by [ContainerCommands], which is
+     * Android-free and unit tested — these are the ones where a formatting slip
+     * silently performs a *different* action on a live world (the wrong enchant
+     * row, the wrong trade, a cleared beacon) rather than failing visibly.
+     *
+     * [syncId] is the same staleness check every container command carries: the
+     * mod refuses the command if the open handler has changed underneath, which
+     * matters more here than for a slot click, since "recipe 4" in whatever
+     * replaced the stonecutter is not a recipe at all.
+     */
+    fun sendButton(syncId: Int, buttonId: Int) =
+        sendCommand(ContainerCommands.button(syncId, buttonId))
+
+    fun sendRename(syncId: Int, name: String) =
+        sendCommand(ContainerCommands.rename(syncId, name))
+
+    fun sendTrade(syncId: Int, index: Int) =
+        sendCommand(ContainerCommands.trade(syncId, index))
+
+    fun sendBeaconEffects(syncId: Int, primary: String?, secondary: String?) =
+        sendCommand(ContainerCommands.beaconEffects(syncId, primary, secondary))
+
+    fun sendSlotState(syncId: Int, slotId: Int, enabled: Boolean) =
+        sendCommand(ContainerCommands.slotState(syncId, slotId, enabled))
 
     /**
      * Says [message] in game, as the player. A leading `/` makes it a command;

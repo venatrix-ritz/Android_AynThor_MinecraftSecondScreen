@@ -185,6 +185,27 @@ class ResourcePackIconProvider(
     fun getMapBackground(): Bitmap? =
         repository?.assetCache?.get(HudIcon.MAP_BACKGROUND) ?: loadAsset(MAP_BACKGROUND_PATH)
 
+    /**
+     * A GUI sprite by its Minecraft sprite id, e.g.
+     * `minecraft:container/slot/brewing_fuel`.
+     *
+     * **This is the one texture lookup with no enum entry, on purpose.** Every
+     * other sprite here is one this app decided it wanted, so naming it in
+     * [HudIcon] is right. These are named by the *game*, at runtime: the mod
+     * reports whatever `Slot.getBackgroundSprite()` returned, and an enum can
+     * only ever list what someone thought to enumerate. So the id is converted
+     * to a catalog key by the same mechanical rule the mod registered it under
+     * (`HudAssetCatalog.putSprite`), and a sprite the catalog doesn't serve — a
+     * modded container's own placeholder — simply resolves to null and draws no
+     * ghost. That degrades the way everything else here does: appearance, not
+     * function.
+     */
+    fun getSpriteBitmap(spriteId: String?): Bitmap? {
+        if (spriteId == null) return null
+        val path = spriteId.substringAfter(':')
+        return repository?.assetCache?.get(path.replace('/', '_'))
+    }
+
     private fun loadIconFromAssets(icon: HudIcon): Bitmap? {
         Log.d(TAG, "Test, calling loadIconFromAssets")
         for (candidate in icon.candidateNames) {

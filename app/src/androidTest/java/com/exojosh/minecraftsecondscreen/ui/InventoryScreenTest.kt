@@ -10,9 +10,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.exojosh.minecraftsecondscreen.net.ContainerSlot
 import com.exojosh.minecraftsecondscreen.net.ContainerState
 import com.exojosh.minecraftsecondscreen.net.HotbarSlot
+import com.exojosh.minecraftsecondscreen.net.ResourcePackIconProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -23,11 +25,15 @@ import org.junit.runner.RunWith
  * Drag-to-move, exercised by actually dragging.
  *
  * This is an *instrumented* test rather than a JVM one because the thing worth
- * checking is the gesture: `InventoryLayout` already has the slot maths pinned
- * in `InventoryLayoutTest`, but the wiring from "a finger moved from here to
- * there" to "these two clicks went to the server" only exists inside a real
- * Compose pointer pipeline. A wrong answer here isn't a crash — it's an item
- * moving somewhere the player didn't ask for.
+ * checking is the gesture: `ContainerLayout` and `InventoryLayout` already have
+ * the slot maths pinned in their own JVM tests, but the wiring from "a finger
+ * moved from here to there" to "these two clicks went to the server" only exists
+ * inside a real Compose pointer pipeline. A wrong answer here isn't a crash —
+ * it's an item moving somewhere the player didn't ask for.
+ *
+ * Both layout shapes are exercised, because they are genuinely different
+ * problems: the player's inventory is one regular grid, and a container is
+ * scattered cells at vanilla's coordinates with real dead space between them.
  *
  * It also happens to be the only way this UI can be checked on the Thor at all
  * when the AYN dual-screen assistant panel is sitting over the `Presentation`;
@@ -58,10 +64,59 @@ class InventoryScreenTest {
         offhandIndex = 45
     )
 
+    /**
+     * A furnace, at vanilla's own slot coordinates: input (56,17) above fuel
+     * (56,53), output (116,35) off to the side.
+     *
+     * Worth having here and not only in `ContainerLayoutTest` because the shape
+     * changes what a *drag* has to cope with. On the player's inventory every
+     * cell is on one regular grid; here the cells are scattered with real empty
+     * space between them, which is the case the old row-and-column hit testing
+     * could not have expressed.
+     */
+    private fun furnace() = ContainerState(
+        syncId = 4,
+        handlerType = "minecraft:furnace",
+        title = "Furnace",
+        cursor = empty,
+        slots = List(39) { index ->
+            ContainerSlot(
+                stack = if (index == 36) stone else empty,
+                mayPlace = index != 2,
+                x = when (index) {
+                    0 -> 56
+                    1 -> 56
+                    2 -> 116
+                    // The player's slots: this layout takes their rows from
+                    // InventoryLayout, so their coordinates go unread.
+                    else -> 8
+                },
+                y = when (index) {
+                    0 -> 17
+                    1 -> 53
+                    2 -> 35
+                    else -> 84
+                }
+            )
+        },
+        playerStart = 3,
+        hotbarStart = 30,
+        armorStart = -1,
+        offhandIndex = -1
+    )
+
+    /** No repository, so no socket-delivered sprites — every placeholder and
+     *  every piece of progress art resolves to null, which is the same path a
+     *  fresh install takes before the asset bundle lands. */
+    private fun iconProvider() = ResourcePackIconProvider(
+        InstrumentationRegistry.getInstrumentation().targetContext
+    )
+
     private fun setContent(
         state: ContainerState,
         clicks: MutableList<Click>
     ) {
+        val provider = iconProvider()
         rule.setContent {
             InventoryScreen(
                 state = state,
@@ -69,6 +124,7 @@ class InventoryScreenTest {
                 glintTexture = null,
                 isConnected = true,
                 itemIcon = { null },
+                iconProvider = provider,
                 onSlotClick = { syncId, slotId, button, action ->
                     clicks += Click(syncId, slotId, button, action)
                 },
@@ -296,6 +352,86 @@ class InventoryScreenTest {
         rule.waitForIdle()
 
         assertEquals(listOf(Click(7, -999, 0, "PICKUP")), clicks)
+    }
+
+    /**
+     * The interaction this whole change was for: dragging out of a furnace's
+     * output into the player's inventory.
+     *
+     * The furnace's cells aren't on the player's grid — the output sits alone to
+     * the right, with empty space around it — so this is the drag that the old
+     * row/column arithmetic had no way to track. It also confirms the two regions
+     * share one gesture handler: the finger starts in the container's region and
+     * finishes in the player's.
+     */
+    @Test
+    fun draggingFromAFurnaceOutputIntoTheInventoryWorks() {
+        val clicks = mutableListOf<Click>()
+        setContent(furnace(), clicks)
+
+        val from = slotCentreInGrid(2)
+        val to = slotCentreInGrid(30)
+
+        rule.onNodeWithTag(GRID_TEST_TAG).performTouchInput {
+            down(from)
+            moveTo(from + (to - from) / 3f)
+            moveTo(from + (to - from) * 2f / 3f)
+            moveTo(to)
+            up()
+        }
+        rule.waitForIdle()
+
+        assertEquals(2, clicks.size)
+        assertEquals(Click(4, 2, 0, "PICKUP"), clicks[0])
+        assertEquals(Click(4, 30, 0, "PICKUP"), clicks[1])
+    }
+
+    /** The container's name is the only label on the screen saying which block
+     *  the shape above belongs to. */
+    @Test
+    fun theContainerTitleIsShown() {
+        setContent(furnace(), mutableListOf())
+        rule.onNodeWithText("Furnace").assertIsDisplayed()
+    }
+
+    /**
+     * A furnace's three cells all reachable, and the space between them dead.
+     *
+     * That second half is the point: a tap in the gap where vanilla draws its
+     * arrow must do nothing. Snapping it to the nearest cell would make the
+     * output slot a much bigger target than it looks, and on a furnace the
+     * neighbouring target is "take the smelted item".
+     */
+    @Test
+    fun aFurnacePlacesItsThreeSlotsApartWithDeadSpaceBetween() {
+        val clicks = mutableListOf<Click>()
+        setContent(furnace(), clicks)
+
+        for (index in 0..2) {
+            rule.onNodeWithTag(slotTestTag(index)).assertIsDisplayed()
+        }
+
+        val input = rule.onNodeWithTag(slotTestTag(0)).fetchSemanticsNode().boundsInRoot
+        val fuel = rule.onNodeWithTag(slotTestTag(1)).fetchSemanticsNode().boundsInRoot
+        val output = rule.onNodeWithTag(slotTestTag(2)).fetchSemanticsNode().boundsInRoot
+
+        assertEquals("input and fuel share a column", input.left, fuel.left, 0.5f)
+        assertTrue("fuel is below the input", fuel.top > input.bottom)
+        assertTrue("the output is right of both", output.left > input.right)
+
+        // Immediately right of the input, in the arrow's territory.
+        val grid = rule.onNodeWithTag(GRID_TEST_TAG).fetchSemanticsNode().boundsInRoot
+        val gap = Offset(
+            input.right - grid.left + (output.left - input.right) / 2f,
+            input.center.y - grid.top
+        )
+        rule.onNodeWithTag(GRID_TEST_TAG).performTouchInput {
+            down(gap)
+            up()
+        }
+        rule.waitForIdle()
+
+        assertTrue("a tap in the gap must not click a slot", clicks.isEmpty())
     }
 
     @Test

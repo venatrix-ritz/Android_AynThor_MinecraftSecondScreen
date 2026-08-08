@@ -210,7 +210,20 @@ fun SecondScreenApp(
                             glintTexture = iconProvider.getIcon(HudIcon.ENCHANTED_GLINT),
                             isConnected = isConnected,
                             itemIcon = hudRepository::requestIcon,
-                            onSlotClick = hudRepository::sendSlotClick
+                            // For the slot placeholders and progress art, which
+                            // are named by the game at runtime rather than by a
+                            // HudIcon entry -- see getSpriteBitmap.
+                            iconProvider = iconProvider,
+                            onSlotClick = hudRepository::sendSlotClick,
+                            // The containers whose function isn't a slot click:
+                            // enchanting offers, stonecutter recipes and loom
+                            // patterns go through the button verb, while trades,
+                            // beacon effects and the anvil rename each have their
+                            // own packet behind them.
+                            onButton = hudRepository::sendButton,
+                            onTrade = hudRepository::sendTrade,
+                            onBeaconEffects = hudRepository::sendBeaconEffects,
+                            onRename = hudRepository::sendRename
                         )
 
                         SecondScreenTab.INPUT -> InputGridScreen(
