@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -29,14 +30,20 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.util.fastFirstOrNull
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.IntOffset
@@ -295,6 +302,14 @@ fun CreativeScreen(
  * The hovered slot is outlined during a drag, because a creative give *replaces*
  * whatever was there — the player needs to see which slot they're about to
  * overwrite before they lift.
+ *
+ * **The cells are square, measured, and not a constant.** They used to be
+ * `weight(1f)` wide against a fixed 46dp height, which is a ninth of the panel
+ * against a number — the two agree only by accident, and on the Thor they don't:
+ * the grid's cells above are square at that same ninth, so the hotbar came out
+ * visibly flattened under a row of squares it is supposed to match. Measuring the
+ * row and sizing the cell from it is what keeps the drop target the same shape as
+ * the thing being dropped, at any panel width.
  */
 @Composable
 private fun CreativeHotbar(
@@ -310,40 +325,44 @@ private fun CreativeHotbar(
 ) {
     val gui = LocalMinecraftGui.current
 
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(top = ROW_GAP),
-        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
-    ) {
-        for (index in 0 until HOTBAR_SLOTS) {
-            val stack = hotbar.getOrNull(index)
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(HOTBAR_CELL)
-                    .onGloballyPositioned {
-                        onSlotBounds(index, it.boundsInRoot().translate(-rootOrigin))
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth().padding(top = ROW_GAP)) {
+        // The same arithmetic LazyVerticalGrid does for the grid above: the width
+        // left over once the eight gaps are taken out, split nine ways.
+        val cell = (maxWidth - ROW_GAP * (HOTBAR_SLOTS - 1)) / HOTBAR_SLOTS
+        val bevel = cell / SLOT_PIXELS
+
+        Row(horizontalArrangement = Arrangement.spacedBy(ROW_GAP)) {
+            for (index in 0 until HOTBAR_SLOTS) {
+                val stack = hotbar.getOrNull(index)
+                Box(
+                    modifier = Modifier
+                        .size(cell)
+                        .onGloballyPositioned {
+                            onSlotBounds(index, it.boundsInRoot().translate(-rootOrigin))
+                        }
+                        .vanillaSlot(gui.slot)
+                        .semantics { contentDescription = "Hotbar slot ${index + 1}" }
+                        .clickable { onTapSlot(index) }
+                ) {
+                    if (stack != null && stack.itemId != InventoryMoves.AIR_ITEM_ID) {
+                        Box(modifier = Modifier.fillMaxSize().padding(bevel)) {
+                            ItemStackGraphic(
+                                stack = stack,
+                                icon = itemIcon(stack.itemId),
+                                fontSheet = fontSheet,
+                                glintTexture = glintTexture,
+                                unit = (cell - bevel * 2) / ITEM_AREA_PIXELS
+                            )
+                        }
                     }
-                    .vanillaSlot(gui.slot)
-                    .semantics { contentDescription = "Hotbar slot ${index + 1}" }
-                    .clickable { onTapSlot(index) }
-            ) {
-                if (stack != null && stack.itemId != InventoryMoves.AIR_ITEM_ID) {
-                    Box(modifier = Modifier.fillMaxSize().padding(HOTBAR_CELL / SLOT_PIXELS)) {
-                        ItemStackGraphic(
-                            stack = stack,
-                            icon = itemIcon(stack.itemId),
-                            fontSheet = fontSheet,
-                            glintTexture = glintTexture,
-                            unit = (HOTBAR_CELL - HOTBAR_CELL / SLOT_PIXELS * 2) / ITEM_AREA_PIXELS
-                        )
+                    // The drop target wins over the selected-slot marker: during a
+                    // drag "where will this land" matters more than "what am I
+                    // holding".
+                    when {
+                        index == hoveredSlot ->
+                            Box(modifier = Modifier.fillMaxSize().vanillaSlotHighlight())
+                        index == selectedSlot -> SlotOverlay(SELECTED_SLOT_TINT)
                     }
-                }
-                // The drop target wins over the selected-slot marker: during a drag
-                // "where will this land" matters more than "what am I holding".
-                when {
-                    index == hoveredSlot ->
-                        Box(modifier = Modifier.fillMaxSize().vanillaSlotHighlight())
-                    index == selectedSlot -> SlotOverlay(SELECTED_SLOT_TINT)
                 }
             }
         }
@@ -512,12 +531,17 @@ private fun ItemGrid(
                         cellOrigin = it.boundsInRoot().topLeft - rootOrigin
                     }
                     .vanillaSlot(gui.slot)
-                    .semantics { contentDescription = itemId }
-                    .clickable { onGive(itemId) }
+                    .semantics {
+                        contentDescription = itemId
+                        // The tap is detected in raw pointer input below, which
+                        // leaves nothing for accessibility to activate.
+                        onClick { onGive(itemId); true }
+                    }
                     .pointerInput(itemId) {
-                        detectDragGesturesAfterLongPress(
+                        detectTapOrHoldDrag(
+                            onTap = { onGive(itemId) },
                             onDragStart = { local -> onDragStart(itemId, cellOrigin + local) },
-                            onDrag = { change, _ -> onDragMove(change.positionChange()) },
+                            onDragMove = onDragMove,
                             onDragEnd = onDragEnd,
                             onDragCancel = onDragCancel
                         )
@@ -533,6 +557,108 @@ private fun ItemGrid(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Tap, or hold-then-drag, decided from the pointer events' own timestamps.
+ *
+ * <h2>Why not `detectDragGesturesAfterLongPress` plus `clickable`</h2>
+ * That's what this was, and it did not work on the device while passing every
+ * test written against it. `awaitLongPressOrCancellation` arms a timeout on the
+ * pointer-input scope's clock and needs it to *fire* while the finger sits still —
+ * and a still finger produces no pointer events. In a Compose test
+ * `advanceEventTime` drives that clock, so the long press always fired and the
+ * drag always worked; on the Thor the first real movement reached the
+ * `LazyVerticalGrid`'s scroller instead, and a held finger dragged the grid rather
+ * than lifting the item. The test wasn't wrong about the code, it was driving a
+ * clock production doesn't have.
+ *
+ * So the hold is measured against `uptimeMillis` **carried by the events
+ * themselves** and evaluated when the next one arrives. Nothing has to fire in a
+ * vacuum: the only moment the decision matters is the first significant movement,
+ * and that movement is itself an event. It also makes the test drive the same code
+ * path production does, rather than a different one that happens to agree.
+ *
+ * <h2>Why the tap is here too</h2>
+ * Because the drag has to **consume** movement to keep the scroller out of it, and
+ * a consumed move cancels `clickable`'s pending tap anyway. Two detectors racing
+ * over one finger is what produced the original bug; one that knows about both
+ * outcomes can just decide.
+ *
+ * The cost is the Material ripple, which this screen didn't want — every other
+ * control here is drawn from the game's own sprites and `MinecraftButton` already
+ * passes `indication = null` for the same reason.
+ */
+private suspend fun PointerInputScope.detectTapOrHoldDrag(
+    onTap: () -> Unit,
+    onDragStart: (Offset) -> Unit,
+    onDragMove: (Offset) -> Unit,
+    onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit
+) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val holdMillis = viewConfiguration.longPressTimeoutMillis
+        // Generous on purpose: a thumb's contact patch wanders several pixels just
+        // from the pressure changing, and treating that as a scroll is the failure
+        // this whole detector exists to avoid. Past it, it really is a scroll.
+        val bailSlop = viewConfiguration.touchSlop * HOLD_SLOP_FACTOR
+
+        var lifted = false
+        var completed = false
+
+        while (true) {
+            val event = awaitPointerEvent(PointerEventPass.Main)
+            val change = event.changes.fastFirstOrNull { it.id == down.id } ?: break
+
+            if (change.changedToUpIgnoreConsumed()) {
+                if (lifted) {
+                    completed = true
+                } else if ((change.position - down.position).getDistance()
+                    <= viewConfiguration.touchSlop
+                ) {
+                    // Short and still: an ordinary tap. A long press that never
+                    // moved lands here too, which is right -- nothing was dragged.
+                    onTap()
+                    completed = true
+                }
+                break
+            }
+
+            if (!lifted) {
+                // Someone outside took the gesture -- the grid began scrolling.
+                if (change.isConsumed) break
+
+                val travel = (change.position - down.position).getDistance()
+                if (change.uptimeMillis - down.uptimeMillis >= holdMillis) {
+                    // The lift *is* this event, so the drag starts where the finger
+                    // already is. Falling through to the move below as well would
+                    // count this event's travel twice and throw the carried item
+                    // past wherever the finger actually is -- which reads as the
+                    // drop missing the slot the player is plainly over.
+                    lifted = true
+                    onDragStart(change.position)
+                    change.consume()
+                    continue
+                } else if (travel > bailSlop) {
+                    // Moved before the hold was earned: let it scroll, untouched.
+                    break
+                } else {
+                    // Held, but wandering. Swallow it so the scroller never
+                    // accumulates enough to claim the gesture out from under us.
+                    change.consume()
+                    continue
+                }
+            }
+
+            onDragMove(change.positionChange())
+            change.consume()
+        }
+
+        if (lifted) {
+            if (completed) onDragEnd() else onDragCancel()
         }
     }
 }
@@ -565,12 +691,15 @@ private val PANEL_INSET = 6.dp
  *  unrelated things. */
 private const val GRID_COLUMNS = 9
 private const val HOTBAR_SLOTS = 9
-private val HOTBAR_CELL = 46.dp
 private val ROW_HEIGHT = 26.dp
 private val ROW_GAP = 3.dp
 private val TAB_CELL = 34.dp
 private val ITEM_CELL = 42.dp
 private val LABEL_PIXEL = 1.5.dp
+/** How far a finger may wander during the hold and still count as holding, as a
+ *  multiple of the system's touch slop. One slop is the point the scroller claims
+ *  the gesture, which is exactly what a resting thumb was tripping. */
+private const val HOLD_SLOP_FACTOR = 2f
 
 private val PANEL_TEXT = Color(0xFFDDDDDD)
 private val DIM_TEXT = Color(0xFF8A8A8A)

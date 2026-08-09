@@ -1,82 +1,41 @@
 package com.exojosh.minecraftsecondscreen
 
+import android.hardware.display.DisplayManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Display
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import com.exojosh.minecraftsecondscreen.ui.theme.AYNThorSecondScreenMinecraftDisplayTheme
-import com.exojosh.minecraftsecondscreen.ui.HudScreen
-import com.exojosh.minecraftsecondscreen.ui.InputGridScreen
-import com.exojosh.minecraftsecondscreen.net.HudRepository
-import com.exojosh.minecraftsecondscreen.net.HudState
-import com.exojosh.minecraftsecondscreen.SecondScreenApp
-import com.exojosh.minecraftsecondscreen.SecondScreenPresentation
-import android.hardware.display.DisplayManager
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.lifecycleScope
 import com.exojosh.minecraftsecondscreen.net.GameDirectoryAccess
+import com.exojosh.minecraftsecondscreen.net.HudRepository
 import com.exojosh.minecraftsecondscreen.net.ResourcePackIconProvider
 
-/*
-class MainActivity : ComponentActivity() {
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent {
-            AYNThorSecondScreenMinecraftDisplayTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Greeting(
-                        name = "Android",
-                        modifier = Modifier.padding(innerPadding)
-                    )
-                }
-            }
-        }
-    }
-}
-*/
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-
-@Preview(showBackground = true)
-@Composable
-fun GreetingPreview() {
-    AYNThorSecondScreenMinecraftDisplayTheme {
-        Greeting("Android")
-    }
-}
-
-
-
 /**
- * Primary-screen activity. Its own UI is a minimal status view -- the real
- * content renders on the Thor's second screen via SecondScreenPresentation.
+ * Host activity. **It deliberately draws nothing of its own on the Thor.**
+ *
+ * It used to paint a status line on the primary screen ("Waiting for mod on
+ * 127.0.0.1:48291..."), which was the wrong thing in the wrong place: the
+ * primary screen is the one running Minecraft, so the only time that line was
+ * visible was when the game wasn't, and everything it reported -- connected or
+ * not, and why -- the second screen already says for itself. Its window is now
+ * translucent with no content, so launching the app leaves the top screen
+ * showing whatever was already there and lights up the bottom panel instead.
+ *
+ * The activity still has to exist and stay alive: a `Presentation` is a Dialog
+ * owned by an Activity, and it is dismissed when that Activity is destroyed.
+ * So this class is purely the second screen's anchor and the owner of the one
+ * [HudRepository] instance.
  *
  * Display detection: the Thor exposes its bottom panel as a standard Android
- * "presentation" category external display, discoverable through
- * DisplayManager like any other secondary display (same mechanism used for
- * HDMI-out or Chromecast). If no such display is found (e.g. running on a
- * regular single-screen phone during development), we skip showing the
- * Presentation and just show status here instead.
+ * "presentation" category display, discoverable through [DisplayManager] like
+ * any other secondary display (the same mechanism as HDMI-out or Chromecast).
  */
 class MainActivity : ComponentActivity() {
 
@@ -88,10 +47,28 @@ class MainActivity : ComponentActivity() {
     }
     private lateinit var iconProvider: ResourcePackIconProvider
 
-
-
     private lateinit var hudRepository: HudRepository
     private var presentation: SecondScreenPresentation? = null
+
+    /**
+     * Only ever true on a single-screen device -- see [showOnPrimary] below.
+     * Compose state rather than a flag, so attaching the panel late clears the
+     * primary-screen copy in the same frame it appears on the bottom screen.
+     */
+    private var showOnPrimary by mutableStateOf(false)
+
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = attachSecondScreen()
+        override fun onDisplayChanged(displayId: Int) = attachSecondScreen()
+        override fun onDisplayRemoved(displayId: Int) {
+            // A removed display dismisses its own Presentation; drop our
+            // reference so the next attach doesn't think one is still up.
+            if (presentation?.display?.displayId == displayId) {
+                presentation = null
+            }
+            attachSecondScreen()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
 
@@ -108,45 +85,99 @@ class MainActivity : ComponentActivity() {
 
         hudRepository.start()
 
+        // The single-screen fallback. On the Thor this composes nothing at all
+        // and the window stays transparent; on a phone or emulator, where there
+        // is no presentation display to attach to, it puts the *real* UI on the
+        // only screen there is. That's the dev/test path, and it's strictly
+        // more useful than the status line it replaced -- which showed a
+        // connection state and none of the screen being built.
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    val connected by hudRepository.isConnected.collectAsState()
-                    Box(
-                        modifier = Modifier.fillMaxSize().padding(24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            if (connected) "Connected to Minecraft mod -- second screen active"
-                            else "Waiting for mod on 127.0.0.1:48291..."
-                        )
-                    }
-                }
+            if (showOnPrimary) {
+                SecondScreenApp(
+                    hudRepository = hudRepository,
+                    iconProvider = iconProvider
+                )
             }
         }
 
-        showPresentationIfAvailable()
+        // Registered before the first attach, so a panel that enumerates a beat
+        // after launch is picked up rather than missed for the whole session.
+        getSystemService(DisplayManager::class.java)
+            ?.registerDisplayListener(displayListener, Handler(Looper.getMainLooper()))
+
+        attachSecondScreen()
     }
 
-    private fun showPresentationIfAvailable() {
-        val displayManager = getSystemService(DisplayManager::class.java)
-        val presentationDisplays = displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+    override fun onStart() {
+        super.onStart()
+        // Coming back from the background: the panel may have been re-enumerated
+        // (the Thor's assistant overlay, a dock, a display reset) while we were
+        // stopped, and no listener callback survives a missed window.
+        attachSecondScreen()
+    }
 
-        val secondDisplay = presentationDisplays.firstOrNull() ?: run {
-            // Not on a dual-screen device, or the second display isn't
-            // exposed as a presentation display -- nothing to attach to.
+    /**
+     * Idempotent: safe to call from onCreate, onStart and every display event.
+     * Shows the Presentation on the bottom panel if one isn't already up, and
+     * only falls back to the primary screen once there is provably no panel to
+     * use -- so content lands on the bottom screen whenever a bottom screen
+     * exists, and the fallback never flashes on the way there.
+     */
+    private fun attachSecondScreen() {
+        if (isFinishing || isDestroyed) return
+
+        presentation?.let {
+            if (it.isShowing) {
+                showOnPrimary = false
+                return
+            }
+            it.dismiss()
+            presentation = null
+        }
+
+        val display = findSecondScreenDisplay()
+        if (display == null) {
+            // Not on a dual-screen device, or the panel isn't exposed as a
+            // secondary display -- render here instead of nowhere.
+            showOnPrimary = true
             return
         }
 
         presentation = SecondScreenPresentation(
             activity = this,
-            display = secondDisplay,
+            display = display,
             hudRepository = hudRepository,
             iconProvider = iconProvider
-        ).also { it.show() }
+        ).also { shown ->
+            shown.setOnDismissListener {
+                // Dismissed by the system rather than by us (display pulled).
+                if (presentation === shown) presentation = null
+            }
+            shown.show()
+        }
+        showOnPrimary = false
+    }
+
+    /**
+     * The presentation *category* is the documented way to ask this, and on the
+     * Thor it answers with the bottom panel. The second pass exists because
+     * that category is a device-declared flag: a dual-screen device that fails
+     * to set it would otherwise fall all the way back to the primary screen,
+     * even though a perfectly usable second display is sitting right there.
+     * Either way the default display is never a candidate -- that's the one
+     * running the game.
+     */
+    private fun findSecondScreenDisplay(): Display? {
+        val displayManager = getSystemService(DisplayManager::class.java) ?: return null
+
+        return displayManager.getDisplays(DisplayManager.DISPLAY_CATEGORY_PRESENTATION)
+            .firstOrNull { it.displayId != Display.DEFAULT_DISPLAY && it.isValid }
+            ?: displayManager.getDisplays()
+                .firstOrNull { it.displayId != Display.DEFAULT_DISPLAY && it.isValid }
     }
 
     override fun onDestroy() {
+        getSystemService(DisplayManager::class.java)?.unregisterDisplayListener(displayListener)
         presentation?.dismiss()
         presentation = null
         super.onDestroy()
