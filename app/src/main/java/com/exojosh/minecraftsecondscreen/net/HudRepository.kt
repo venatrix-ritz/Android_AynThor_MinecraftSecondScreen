@@ -356,6 +356,15 @@ data class ContainerState(
      * that jumps to the Items tab and never comes back.
      */
     val screenOpen: Boolean = false,
+    /**
+     * Whether the open screen is the *creative* inventory.
+     *
+     * Nothing else here can tell. `CreativeScreenHandler` is built with no type
+     * and isn't the player's handler either, so it arrives looking exactly like a
+     * modded container built without one — which is why the app used to switch to
+     * the Items tab and draw 45 creative cells that no click could reach.
+     */
+    val creativeScreen: Boolean = false,
     /** What's "on the mouse". Non-empty means a move is half-finished — it has
      *  to be drawn, or the player can't see where their item went. */
     val cursor: HotbarSlot,
@@ -832,7 +841,16 @@ class HudRepository(private val scope: CoroutineScope) {
      * Hands the player an item. Creative only; the mod refuses it otherwise rather
      * than trusting the app to know the game mode at the moment of the tap.
      */
-    fun sendGive(itemId: String) = sendCommand("GIVE:$itemId")
+    /**
+     * Hands the player an item.
+     *
+     * [hotbarSlot] is 0..8 and comes from the drag-onto-the-hotbar gesture; null
+     * means "wherever there's room", which is what a plain tap wants. The *handler*
+     * index arithmetic (hotbar is 36..44 there, 0..8 in the inventory) is
+     * deliberately left to the mod, same split as the slot roles.
+     */
+    fun sendGive(itemId: String, hotbarSlot: Int? = null) =
+        sendCommand(if (hotbarSlot == null) "GIVE:$itemId" else "GIVE:$itemId,$hotbarSlot")
 
     /**
      * One chat line, as coloured runs.
@@ -941,6 +959,7 @@ class HudRepository(private val scope: CoroutineScope) {
             handlerType = if (json.isNull("handlerType")) null else json.optString("handlerType"),
             title = if (json.isNull("title")) null else json.optString("title").ifEmpty { null },
             screenOpen = json.optBoolean("screenOpen", false),
+            creativeScreen = json.optBoolean("creativeScreen", false),
             cursor = parseSlot(json.getJSONObject("cursor")),
             slots = slots,
             playerStart = json.getInt("playerStart"),

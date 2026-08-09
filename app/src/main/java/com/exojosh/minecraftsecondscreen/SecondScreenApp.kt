@@ -149,8 +149,14 @@ fun SecondScreenApp(
 
     val screenOpen = container?.screenOpen == true
     val containerKind = container?.let {
-        ContainerKind.of(it.handlerType, it.isPlayerInventory)
+        ContainerKind.of(it.handlerType, it.isPlayerInventory, it.creativeScreen)
     }
+    // Which tab the open screen belongs on. The creative inventory is the one that
+    // isn't Items: its handler can't be operated by slot clicks at all, so sending
+    // the player there would show 45 cells that do nothing.
+    val tabForOpenScreen =
+        if (container?.creativeScreen == true) SecondScreenTab.CREATIVE
+        else SecondScreenTab.ITEMS
 
     /**
      * Follow the game: when a container opens, show the Items tab; when it closes,
@@ -169,18 +175,22 @@ fun SecondScreenApp(
      * ([ContainerSettings]) — a grindstone is often a two-second visit, and having
      * the screen jump off the map and back for it is worse than not helping.
      */
-    LaunchedEffect(screenOpen, containerKind) {
+    LaunchedEffect(screenOpen, containerKind, tabForOpenScreen) {
         if (screenOpen && containerKind != null) {
-            if (selectedTab != SecondScreenTab.ITEMS &&
+            if (selectedTab != tabForOpenScreen &&
                 containerSettings.opensAutomatically(containerKind)
             ) {
                 tabBeforeContainer = selectedTab
-                selectedTab = SecondScreenTab.ITEMS
+                selectedTab = tabForOpenScreen
             }
         } else {
             // Closed. Restore only if we were the reason the tab changed.
             tabBeforeContainer?.let { previous ->
-                if (selectedTab == SecondScreenTab.ITEMS) selectedTab = previous
+                if (selectedTab == SecondScreenTab.ITEMS ||
+                    selectedTab == SecondScreenTab.CREATIVE
+                ) {
+                    selectedTab = previous
+                }
             }
             tabBeforeContainer = null
         }
@@ -307,6 +317,12 @@ fun SecondScreenApp(
 
                         SecondScreenTab.CREATIVE -> CreativeScreen(
                             groups = creativeGroups,
+                            // From the snapshot, not the container message: with
+                            // the creative screen open the container describes the
+                            // creative handler, so the player's own slots aren't
+                            // in it.
+                            hotbar = hudState?.hotbar ?: emptyList(),
+                            selectedSlot = hudState?.selectedSlot ?: 0,
                             fontSheet = chatFont,
                             glintTexture = iconProvider.getIcon(HudIcon.ENCHANTED_GLINT),
                             isConnected = isConnected,

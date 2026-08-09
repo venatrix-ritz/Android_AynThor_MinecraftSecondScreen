@@ -149,6 +149,21 @@ fun InventoryScreen(
         return
     }
 
+    // The creative screen's handler is the one thing this tab cannot draw usefully.
+    // It has 45 item-page cells that `clickSlot` doesn't operate — creative
+    // selection goes through a different packet entirely — so rendering them would
+    // be a grid of controls that silently do nothing. The takeover routes here to
+    // the Creative tab instead; this covers a player who taps Items by hand.
+    if (state.creativeScreen) {
+        Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                text = "Creative inventory — use the Creative tab",
+                color = Color(0xFF8A8A8A)
+            )
+        }
+        return
+    }
+
     var moveMode by remember { mutableStateOf(MoveMode.STACK) }
 
     // Keyed on what can change the *shape*, not on the state itself: the slots'

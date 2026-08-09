@@ -29,6 +29,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.offset
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.platform.LocalDensity
+import kotlin.math.roundToInt
 import com.exojosh.minecraftsecondscreen.net.CreativeGroup
 import com.exojosh.minecraftsecondscreen.net.HotbarSlot
 
@@ -66,12 +79,18 @@ import com.exojosh.minecraftsecondscreen.net.HotbarSlot
 @Composable
 fun CreativeScreen(
     groups: List<CreativeGroup>,
+    /** The player's own hotbar, from the HUD snapshot. With the creative screen
+     *  open the container message describes the *creative* handler, so this is the
+     *  only place the player's real slots are available. */
+    hotbar: List<HotbarSlot>,
+    selectedSlot: Int,
     fontSheet: MinecraftFontSheet?,
     glintTexture: Bitmap?,
     isConnected: Boolean,
     itemIcon: (String) -> Bitmap?,
     onRequestCatalogue: () -> Unit,
-    onGive: (String) -> Unit,
+    /** Item id, and a hotbar slot 0..8 or null for "wherever there's room". */
+    onGive: (String, Int?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // Asked for from composition, so it has to tolerate being hit every frame --
@@ -139,14 +158,120 @@ fun CreativeScreen(
             onClear = { query = ""; typing = false }
         )
 
-        ItemGrid(
-            items = shown,
-            fontSheet = fontSheet,
-            glintTexture = glintTexture,
-            itemIcon = itemIcon,
-            onGive = onGive,
-            modifier = Modifier.fillMaxWidth().weight(1f)
-        )
+        // Drag state, in coordinates relative to the drag layer below.
+        val hotbarBounds = remember { mutableMapOf<Int, Rect>() }
+        var layerOrigin by remember { mutableStateOf(Offset.Zero) }
+        var dragging by remember { mutableStateOf<String?>(null) }
+        var dragPosition by remember { mutableStateOf(Offset.Zero) }
+        var hoveredSlot by remember { mutableStateOf<Int?>(null) }
+
+        val give by rememberUpdatedState(onGive)
+
+        // One layer over the grid *and* the hotbar, so the dragged item can be
+        // drawn anywhere the finger goes. It used to be drawn inside the grid's own
+        // box, which clipped it: the item vanished exactly as it crossed onto the
+        // hotbar, which is the moment the player most needs to see what they're
+        // carrying. Having both children in one box also means one coordinate
+        // space for the cell origins, the hotbar rects and the pointer.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .onGloballyPositioned { layerOrigin = it.boundsInRoot().topLeft }
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                ItemGrid(
+                    items = shown,
+                    fontSheet = fontSheet,
+                    glintTexture = glintTexture,
+                    itemIcon = itemIcon,
+                    // A tap still gives to the first free slot; the drag is for
+                    // choosing *which* slot, not a replacement for tapping.
+                    onGive = { itemId -> give(itemId, null) },
+                    rootOrigin = layerOrigin,
+                    // Long-press, then drag. A plain drag has to stay available for
+                    // scrolling -- it's a thousand items -- so the gesture that
+                    // *takes* an item out is the deliberate one.
+                    //
+                    // The detector lives on each cell, not on a parent. A parent
+                    // pointerInput never sees the pointer here: the grid's
+                    // scrollable and the cell's own clickable are deeper in the tree
+                    // and consume first, which is why the first version of this
+                    // silently did nothing at all. Compose keeps delivering a drag
+                    // to whichever node started it even after the finger leaves that
+                    // node, so tracking across the whole screen still works.
+                    onDragStart = { itemId, at ->
+                        dragging = itemId
+                        dragPosition = at
+                        hoveredSlot = null
+                    },
+                    onDragMove = { delta ->
+                        dragPosition += delta
+                        hoveredSlot = hotbarBounds.entries
+                            .firstOrNull { it.value.contains(dragPosition) }?.key
+                    },
+                    onDragEnd = {
+                        val item = dragging
+                        val slot = hoveredSlot
+                        // Released off the hotbar: nothing happens. A creative give
+                        // replaces whatever was in the slot, so a slipped finger
+                        // must not have a slot guessed for it.
+                        if (item != null && slot != null) give(item, slot)
+                        dragging = null
+                        hoveredSlot = null
+                    },
+                    onDragCancel = {
+                        dragging = null
+                        hoveredSlot = null
+                    },
+                    modifier = Modifier.fillMaxWidth().weight(1f)
+                )
+
+                // The real hotbar, from the HUD snapshot rather than the container
+                // message: while the creative screen is open the container describes
+                // the *creative* handler, so the player's own hotbar isn't in it.
+                // This is both the drop target and the only way to see what a give
+                // actually did.
+                CreativeHotbar(
+                    hotbar = hotbar,
+                    selectedSlot = selectedSlot,
+                    hoveredSlot = hoveredSlot,
+                    fontSheet = fontSheet,
+                    glintTexture = glintTexture,
+                    itemIcon = itemIcon,
+                    rootOrigin = layerOrigin,
+                    onSlotBounds = { index, rect -> hotbarBounds[index] = rect },
+                    onTapSlot = { index -> dragging?.let { give(it, index) } }
+                )
+            }
+
+            // The dragged item under the finger, so the gesture is visible.
+            //
+            // Offset in the *layout* lambda rather than as a Dp, so following the
+            // finger invalidates only placement -- a Dp offset recomputed per frame
+            // would recompose this subtree on every pointer move.
+            dragging?.let { draggedItem ->
+                val half = with(LocalDensity.current) { (ITEM_CELL / 2).toPx() }
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            IntOffset(
+                                (dragPosition.x - half).roundToInt(),
+                                (dragPosition.y - half).roundToInt()
+                            )
+                        }
+                        .size(ITEM_CELL)
+                ) {
+                    ItemStackGraphic(
+                        stack = HotbarSlot(draggedItem, 1, 0, 0, false),
+                        icon = itemIcon(draggedItem),
+                        fontSheet = fontSheet,
+                        glintTexture = glintTexture,
+                        unit = ITEM_CELL / ITEM_AREA_PIXELS
+                    )
+                }
+            }
+        }
 
         if (typing) {
             ChatKeyboard(
@@ -155,6 +280,72 @@ fun CreativeScreen(
                 onSend = { typing = false },
                 modifier = Modifier.fillMaxWidth()
             )
+        }
+    }
+}
+
+/**
+ * The player's hotbar, as a drop target for the grid above.
+ *
+ * Drawn from the HUD snapshot, not from the container message: with the creative
+ * screen open, `currentScreenHandler` is the creative handler, so the player's own
+ * slots aren't in the container state at all. The snapshot always carries the
+ * hotbar, which is what makes this possible without another wire addition.
+ *
+ * The hovered slot is outlined during a drag, because a creative give *replaces*
+ * whatever was there — the player needs to see which slot they're about to
+ * overwrite before they lift.
+ */
+@Composable
+private fun CreativeHotbar(
+    hotbar: List<HotbarSlot>,
+    selectedSlot: Int,
+    hoveredSlot: Int?,
+    fontSheet: MinecraftFontSheet?,
+    glintTexture: Bitmap?,
+    itemIcon: (String) -> Bitmap?,
+    rootOrigin: Offset,
+    onSlotBounds: (Int, Rect) -> Unit,
+    onTapSlot: (Int) -> Unit
+) {
+    val gui = LocalMinecraftGui.current
+
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = ROW_GAP),
+        horizontalArrangement = Arrangement.spacedBy(ROW_GAP)
+    ) {
+        for (index in 0 until HOTBAR_SLOTS) {
+            val stack = hotbar.getOrNull(index)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(HOTBAR_CELL)
+                    .onGloballyPositioned {
+                        onSlotBounds(index, it.boundsInRoot().translate(-rootOrigin))
+                    }
+                    .vanillaSlot(gui.slot)
+                    .semantics { contentDescription = "Hotbar slot ${index + 1}" }
+                    .clickable { onTapSlot(index) }
+            ) {
+                if (stack != null && stack.itemId != InventoryMoves.AIR_ITEM_ID) {
+                    Box(modifier = Modifier.fillMaxSize().padding(HOTBAR_CELL / SLOT_PIXELS)) {
+                        ItemStackGraphic(
+                            stack = stack,
+                            icon = itemIcon(stack.itemId),
+                            fontSheet = fontSheet,
+                            glintTexture = glintTexture,
+                            unit = (HOTBAR_CELL - HOTBAR_CELL / SLOT_PIXELS * 2) / ITEM_AREA_PIXELS
+                        )
+                    }
+                }
+                // The drop target wins over the selected-slot marker: during a drag
+                // "where will this land" matters more than "what am I holding".
+                when {
+                    index == hoveredSlot ->
+                        Box(modifier = Modifier.fillMaxSize().vanillaSlotHighlight())
+                    index == selectedSlot -> SlotOverlay(SELECTED_SLOT_TINT)
+                }
+            }
         }
     }
 }
@@ -267,11 +458,15 @@ private fun SearchRow(
 }
 
 /**
- * The items, as a scrolling grid of slots. A tap hands one over.
+ * The items, as a scrolling grid of slots. A tap hands one over; a long-press and
+ * drag onto the hotbar puts it in a chosen slot.
  *
- * `GridCells.Adaptive` rather than a fixed column count, so the grid fills
- * whatever width it's given at a cell size that stays thumb-sized — the panel is
- * a different shape with the keyboard open than with it closed.
+ * **Nine columns, fixed.** It was `GridCells.Adaptive`, which filled the width at
+ * whatever count fitted — eleven on the Thor — and that's wrong for this screen
+ * rather than merely different: the creative inventory is nine wide in the game,
+ * the hotbar under it is nine wide, and a grid on a different pitch to the row it
+ * drops onto reads as two unrelated things. Cells now take a ninth of the width
+ * each instead of a fixed size.
  */
 @Composable
 private fun ItemGrid(
@@ -280,6 +475,11 @@ private fun ItemGrid(
     glintTexture: Bitmap?,
     itemIcon: (String) -> Bitmap?,
     onGive: (String) -> Unit,
+    rootOrigin: Offset,
+    onDragStart: (String, Offset) -> Unit,
+    onDragMove: (Offset) -> Unit,
+    onDragEnd: () -> Unit,
+    onDragCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val gui = LocalMinecraftGui.current
@@ -292,7 +492,7 @@ private fun ItemGrid(
     }
 
     LazyVerticalGrid(
-        columns = GridCells.Adaptive(minSize = ITEM_CELL),
+        columns = GridCells.Fixed(GRID_COLUMNS),
         modifier = modifier,
         horizontalArrangement = Arrangement.spacedBy(ROW_GAP),
         verticalArrangement = Arrangement.spacedBy(ROW_GAP)
@@ -300,20 +500,36 @@ private fun ItemGrid(
         // Keyed by id so scrolling doesn't re-request icons for cells that only
         // moved -- the ids are distinct within a group by construction.
         items(items, key = { it }) { itemId ->
+            // The cell's own top-left in the drag layer's coordinates. A drag
+            // detector reports positions relative to its own node, so this is what
+            // converts them into something comparable with the hotbar's rects.
+            var cellOrigin by remember { mutableStateOf(Offset.Zero) }
+
             Box(
                 modifier = Modifier
-                    .size(ITEM_CELL)
+                    .aspectRatio(1f)
+                    .onGloballyPositioned {
+                        cellOrigin = it.boundsInRoot().topLeft - rootOrigin
+                    }
                     .vanillaSlot(gui.slot)
                     .semantics { contentDescription = itemId }
                     .clickable { onGive(itemId) }
+                    .pointerInput(itemId) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { local -> onDragStart(itemId, cellOrigin + local) },
+                            onDrag = { change, _ -> onDragMove(change.positionChange()) },
+                            onDragEnd = onDragEnd,
+                            onDragCancel = onDragCancel
+                        )
+                    }
             ) {
-                Box(modifier = Modifier.fillMaxSize().padding(ITEM_CELL / SLOT_PIXELS)) {
+                Box(modifier = Modifier.fillMaxSize().padding(2.dp)) {
                     ItemStackGraphic(
                         stack = HotbarSlot(itemId, 1, 0, 0, false),
                         icon = itemIcon(itemId),
                         fontSheet = fontSheet,
                         glintTexture = glintTexture,
-                        unit = (ITEM_CELL - ITEM_CELL / SLOT_PIXELS * 2) / ITEM_AREA_PIXELS
+                        unit = ITEM_CELL / ITEM_AREA_PIXELS
                     )
                 }
             }
@@ -344,6 +560,12 @@ private fun PickerLabel(
  *  them rather than shifting by a few pixels. */
 private val SCREEN_PADDING = 4.dp
 private val PANEL_INSET = 6.dp
+/** Vanilla's creative inventory is nine wide, and so is the hotbar it drops
+ *  onto. A grid on a different pitch to the row beneath it reads as two
+ *  unrelated things. */
+private const val GRID_COLUMNS = 9
+private const val HOTBAR_SLOTS = 9
+private val HOTBAR_CELL = 46.dp
 private val ROW_HEIGHT = 26.dp
 private val ROW_GAP = 3.dp
 private val TAB_CELL = 34.dp
@@ -353,3 +575,6 @@ private val LABEL_PIXEL = 1.5.dp
 private val PANEL_TEXT = Color(0xFFDDDDDD)
 private val DIM_TEXT = Color(0xFF8A8A8A)
 private val FIELD_BACKGROUND = Color(0xFF000000)
+/** The slot the player is actually holding. Dimmer than the drag target, which
+ *  has to win while a drag is in flight. */
+private val SELECTED_SLOT_TINT = Color(0x40FFFFFF)

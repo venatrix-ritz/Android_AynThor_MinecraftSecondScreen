@@ -73,6 +73,26 @@ class ContainerKindTest {
         assertEquals(ContainerKind.ENCHANTING, ContainerKind.of("minecraft:enchantment", false))
     }
 
+    /**
+     * The creative inventory is what the inventory key opens in creative, so it
+     * answers to the Inventory toggle. It has to be checked before everything else:
+     * its handler has no type *and* isn't the player's handler, so it looks exactly
+     * like a modded container and would otherwise land in Other -- which is the bug
+     * that had the app switching to the Items tab and drawing unclickable cells.
+     */
+    @Test
+    fun `the creative screen is the Inventory kind, not Other`() {
+        assertEquals(
+            ContainerKind.INVENTORY,
+            ContainerKind.of(null, isPlayerInventory = false, creativeScreen = true)
+        )
+        // Same inputs without the flag are what the bug looked like.
+        assertEquals(
+            ContainerKind.OTHER,
+            ContainerKind.of(null, isPlayerInventory = false, creativeScreen = false)
+        )
+    }
+
     @Test
     fun `an unknown or modded container falls into Other`() {
         assertEquals(ContainerKind.OTHER, ContainerKind.of("somemod:magic_box", false))

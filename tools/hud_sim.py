@@ -460,6 +460,29 @@ for _name, _msg in CONTAINERS.items():
 # Creative mode: the app only offers its Creative tab when the snapshot says so,
 # so the scenario has to set the game mode as well as answer CREATIVE.
 SCENARIOS["creative"] = {"gameMode": "CREATIVE"}
+# Pressing E in creative: the creative screen is open. Its handler has no type and
+# isn't the player's, so `creativeScreen` is the only thing that identifies it --
+# without it the app files it as a modded container and shows the Items tab.
+SCENARIOS["creative-open"] = {
+    "gameMode": "CREATIVE",
+    "__container": {
+        "type": "container",
+        "syncId": 0,
+        "handlerType": None,
+        "title": None,
+        "screenOpen": True,
+        "creativeScreen": True,
+        "cursor": slot("minecraft:air", 0),
+        # The creative handler's own slots: one page of the item list. Deliberately
+        # present and deliberately useless, which is the point -- the app must not
+        # try to draw them.
+        "slots": [cslot(9 + (i % 9) * 18, 18 + (i // 9) * 18) for i in range(45)],
+        "playerStart": 45,
+        "hotbarStart": 45,
+        "armorStart": -1,
+        "offhandIndex": -1,
+    },
+}
 
 
 def player_inventory_container(screen_open):

@@ -80,7 +80,17 @@ enum class ContainerKind(
          * without one. Those want different toggles, and only the slot roles tell
          * them apart.
          */
-        fun of(handlerType: String?, isPlayerInventory: Boolean): ContainerKind {
+        fun of(
+            handlerType: String?,
+            isPlayerInventory: Boolean,
+            creativeScreen: Boolean = false
+        ): ContainerKind {
+            // The creative inventory is what the inventory key opens in creative,
+            // so it answers to the same toggle -- a player who doesn't want E to
+            // take the screen over means that in both game modes. It has to be
+            // checked first: the creative handler has no type and isn't the
+            // player's handler, so it would otherwise fall through to OTHER.
+            if (creativeScreen) return INVENTORY
             if (isPlayerInventory) return INVENTORY
             if (handlerType == null) return OTHER
             return entries.firstOrNull { handlerType in it.handlerTypes } ?: OTHER
