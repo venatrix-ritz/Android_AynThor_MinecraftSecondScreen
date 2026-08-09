@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -135,9 +136,55 @@ data class ChatMessage(val id: Long, val segments: List<ChatSegment>) {
     val plainText: String get() = segments.joinToString("") { it.text }
 }
 
-/** One inventory slot: what's in it, and whether it will accept what's
- *  currently on the cursor. */
-data class ContainerSlot(val stack: HotbarSlot, val mayPlace: Boolean)
+/**
+ * One inventory slot: what's in it, where it sits, and what may be done with it.
+ *
+ * [x]/[y] are vanilla's own GUI coordinates for the slot's 16x16 item area, as
+ * the game's handler placed them — the 18x18 cell drawn around it starts one
+ * pixel up and to the left. They're what lets `ContainerLayout` draw a furnace
+ * as a furnace instead of as three cells in a row, with no per-container table
+ * on this side. `-1` means the mod build predates them.
+ */
+data class ContainerSlot(
+    val stack: HotbarSlot,
+    val mayPlace: Boolean,
+    val x: Int = -1,
+    val y: Int = -1,
+    /**
+     * Sprite id of vanilla's empty-slot placeholder — the sword outline in a
+     * grindstone, the flame in a brewing stand's fuel slot. Null for most slots.
+     * Resolve it through [ResourcePackIconProvider.getSpriteBitmap].
+     */
+    val background: String? = null,
+    /** False only when the handler has switched the slot off: a crafter's
+     *  disabled cell, a horse with no chest. */
+    val enabled: Boolean = true
+)
+
+/**
+ * How far along whatever the open container is doing has got, in the pixel
+ * counts vanilla itself would draw.
+ *
+ * The mod quantises to pixels rather than sending raw progress, because this
+ * whole message is broadcast on change and a raw cook progress changes every
+ * tick — see `ContainerRelay.ProgressState`. Null fields mean the container has
+ * no such indicator.
+ */
+data class ContainerProgress(
+    /** Furnace family: the burn arrow's width, 0..24. */
+    val cookPixels: Int? = null,
+    /** Furnace family: the flame's height, 0..14. Zero means "not lit" — vanilla
+     *  always draws at least one row while burning. */
+    val litPixels: Int? = null,
+    /** Brewing stand: the fuel bar's width, 0..18. */
+    val fuelPixels: Int? = null,
+    /** Brewing stand: the brew arrow's height, 0..28. */
+    val brewPixels: Int? = null,
+    /** Brewing stand: whether it's brewing. The bubble column's phase is
+     *  deliberately not sent — this app animates it from its own frame clock,
+     *  the same split as the enchant glint. */
+    val brewing: Boolean = false
+)
 
 /**
  * The open screen handler, as the mod reports it.
@@ -157,9 +204,167 @@ data class ContainerSlot(val stack: HotbarSlot, val mayPlace: Boolean)
  * close between this arriving and a finger landing, and "slot 3" then means
  * something completely different.
  */
+/**
+ * One selectable thing in a container's list: a stonecutter recipe or a loom
+ * pattern.
+ *
+ * [itemId] is present for a stonecutter, whose options are real items and so can
+ * be drawn as icons through the existing `ICON:` path. It's null for a loom,
+ * whose patterns aren't items at all — vanilla renders those previews off a
+ * banner model — so those show as names. The index in the list **is** the button
+ * id, so never sort or filter these.
+ */
+data class ContainerOption(val label: String, val itemId: String?)
+
+/** A stonecutter's recipes or a loom's patterns, with the current choice.
+ *  [selected] is -1 when nothing is chosen. */
+data class SelectableList(val options: List<ContainerOption>, val selected: Int)
+
+/**
+ * One of the enchanting table's three offers.
+ *
+ * [name] is the enchantment's real name, which vanilla hides behind a hover
+ * tooltip and prints as an obfuscated galactic phrase on the row itself. There's
+ * no hover on a touch screen and the information isn't secret, so the mod sends
+ * it plainly — see `ContainerExtras.Offer`. Empty for a row with no offer.
+ *
+ * [available] is vanilla's own enable rule (enough lapis, enough levels, an offer
+ * present, or creative), computed mod-side so the app greys exactly what the game
+ * would refuse.
+ */
+data class EnchantOffer(
+    val level: Int,
+    val cost: Int,
+    val lapisCost: Int,
+    val name: String,
+    val available: Boolean
+)
+
+data class EnchantingOffers(
+    val offers: List<EnchantOffer>,
+    val lapisCount: Int,
+    val playerLevel: Int
+)
+
+/** One villager trade. [secondCost] is empty for the many trades that want one
+ *  item. [disabled] is out-of-stock, greyed rather than hidden — removing the row
+ *  would renumber every trade below it while the player was looking at it. */
+data class VillagerTrade(
+    val firstCost: HotbarSlot,
+    val secondCost: HotbarSlot,
+    val sell: HotbarSlot,
+    val disabled: Boolean,
+    val uses: Int,
+    val maxUses: Int
+)
+
+data class MerchantTrades(
+    val trades: List<VillagerTrade>,
+    val experience: Int,
+    val levelProgress: Int,
+    val leveled: Boolean
+)
+
+/** One beacon effect. [tier] is the beacon level it needs, so a locked option can
+ *  be shown as locked rather than omitted — leaving it out would have the player
+ *  wondering what the upper rows are for. */
+data class BeaconEffect(val id: String, val name: String, val tier: Int)
+
+data class BeaconState(
+    val primaryOptions: List<BeaconEffect>,
+    val secondaryOptions: List<BeaconEffect>,
+    val primary: String?,
+    val secondary: String?,
+    val level: Int,
+    val hasPayment: Boolean
+)
+
+/** The anvil's XP cost and whether it has a result to take. */
+data class AnvilState(val levelCost: Int, val hasResult: Boolean)
+
+/**
+ * The part of a container that isn't slots.
+ *
+ * One nullable field per kind rather than a `kind` discriminator plus a union of
+ * fields: the wire form says what it is by which key is present, and neither side
+ * has a switch that can disagree with the data. Null for the great majority of
+ * containers, which have nothing beyond their slots.
+ */
+data class ContainerExtras(
+    val enchanting: EnchantingOffers? = null,
+    val stonecutter: SelectableList? = null,
+    val loom: SelectableList? = null,
+    val merchant: MerchantTrades? = null,
+    val beacon: BeaconState? = null,
+    val anvil: AnvilState? = null
+) {
+    /** Whether there's anything at all to draw a panel for. Guards against a
+     *  future kind arriving from a newer mod build that this app can't render:
+     *  an `extras` object with every known field absent must read as "nothing",
+     *  not as an empty panel taking half the screen. */
+    val isEmpty: Boolean
+        get() = enchanting == null && stonecutter == null && loom == null &&
+            merchant == null && beacon == null && anvil == null
+
+    /**
+     * Whether these controls want a narrow rail down the right rather than a band
+     * across the top.
+     *
+     * Only the villager does, and it's a shape argument rather than a preference.
+     * Every other container's choice is a *row* of things — recipes, patterns,
+     * effects, three offers — which reads naturally as a horizontal strip. A trade
+     * is itself three stacks laid out left to right, so a list of trades is a list
+     * of rows, and rows stack downwards. Turned sideways each trade became a wide
+     * card and only three or four fitted on screen at once; stacked in a rail they
+     * all fit, and the rail only has to be as wide as one trade.
+     */
+    val prefersSideRail: Boolean get() = merchant != null
+}
+
+/**
+ * One creative tab: its name, an item to label it with, and everything in it.
+ *
+ * Contents are **item ids, not images**. The app already has an on-demand icon
+ * path, so the picker reuses it rather than needing a second bulk image channel —
+ * and an icon is cached after the first look either way. A tab is a few hundred
+ * ids at most.
+ */
+data class CreativeGroup(
+    val id: String,
+    val name: String,
+    val icon: String?,
+    val items: List<String>
+)
+
 data class ContainerState(
     val syncId: Int,
     val handlerType: String?,
+    /** The container's name as the game titles it ("Furnace", or a renamed
+     *  chest's own name). Null for the player's own handler, which the mod
+     *  deliberately leaves unlabelled — see `ContainerRelay.ScreenHandlerState`. */
+    val title: String? = null,
+    /**
+     * Whether the game actually has this handler's screen open.
+     *
+     * `currentScreenHandler` can't answer this: the player's own handler is
+     * current both with the inventory screen open and with no screen at all, so
+     * "is the player looking at an inventory right now" was unknowable here until
+     * the mod started sending it. This is what the tab takeover triggers on.
+     *
+     * Defaults to false against an older mod build, which reads as "never take
+     * over" — the safe direction, since the alternative would be a second screen
+     * that jumps to the Items tab and never comes back.
+     */
+    val screenOpen: Boolean = false,
+    /**
+     * Whether the open screen is the *creative* inventory.
+     *
+     * Nothing else here can tell. `CreativeScreenHandler` is built with no type
+     * and isn't the player's handler either, so it arrives looking exactly like a
+     * modded container built without one — which is why the app used to switch to
+     * the Items tab and draw 45 creative cells that no click could reach.
+     */
+    val creativeScreen: Boolean = false,
     /** What's "on the mouse". Non-empty means a move is half-finished — it has
      *  to be drawn, or the player can't see where their item went. */
     val cursor: HotbarSlot,
@@ -167,7 +372,9 @@ data class ContainerState(
     val playerStart: Int,
     val hotbarStart: Int,
     val armorStart: Int,
-    val offhandIndex: Int
+    val offhandIndex: Int,
+    val progress: ContainerProgress? = null,
+    val extras: ContainerExtras? = null
 ) {
     val isPlayerInventory: Boolean get() = armorStart >= 0
     val hasCursorStack: Boolean get() = cursor.itemId != "minecraft:air" && cursor.count > 0
@@ -175,6 +382,17 @@ data class ContainerState(
     /** Slots belonging to the open container rather than to the player. Empty
      *  for the player's own inventory. */
     val containerRange: IntRange get() = 0 until playerStart
+
+    /**
+     * Whether the mod sent slot coordinates, i.e. whether the container region
+     * can be laid out in vanilla's own shape.
+     *
+     * Checked against the *container* slots rather than all of them, because
+     * that's the only region whose layout depends on it, and a build old enough
+     * to omit them should fall back for exactly that region and nothing else.
+     */
+    val hasSlotPositions: Boolean
+        get() = containerRange.any { slots.getOrNull(it)?.x?.let { x -> x >= 0 } == true }
 }
 
 data class HudState(
@@ -223,6 +441,15 @@ data class HudState(
 
     /** Vanilla draws no hotbar for a spectator either. */
     val isSpectator: Boolean get() = gameMode == "SPECTATOR"
+
+    /**
+     * Whether the creative item picker applies.
+     *
+     * Compared to the enum's own name, as the mod sends it. Null — an older mod
+     * build — reads as *not* creative, which is the safe direction: the picker
+     * would be a tab that looks functional and whose taps the mod refuses.
+     */
+    val isCreative: Boolean get() = gameMode == "CREATIVE"
 }
 
 /**
@@ -312,6 +539,23 @@ class HudRepository(private val scope: CoroutineScope) {
      */
     private val _container = MutableStateFlow<ContainerState?>(null)
     val container: StateFlow<ContainerState?> = _container.asStateFlow()
+
+    /**
+     * The creative item catalogue, or empty until it's been asked for.
+     *
+     * Deliberately **not** cleared on disconnect or on `noplayer`, for the same
+     * reason `bindings` and `assetCache` aren't: it's the game's item list, it
+     * doesn't belong to a world, and dropping it would make the picker flash back
+     * to empty through a reconnect and then re-download a few tens of kilobytes.
+     */
+    private val _creativeGroups = MutableStateFlow<List<CreativeGroup>>(emptyList())
+    val creativeGroups: StateFlow<List<CreativeGroup>> = _creativeGroups.asStateFlow()
+
+    /** So the catalogue is asked for once rather than on every recomposition of
+     *  the picker -- `requestCreative` is called from composition, like
+     *  `requestIcon`, and has to tolerate being hit every frame. */
+    @Volatile
+    private var creativeRequested = false
 
     /** Item id -> decoded icon bitmap. mutableStateMapOf so Compose recomposes
      *  automatically the moment a requested icon arrives -- no manual refresh needed. */
@@ -469,6 +713,11 @@ class HudRepository(private val scope: CoroutineScope) {
             // connection re-asks immediately instead of waiting out timeouts.
             pendingIconRequests.clear()
             failedIconRequests.clear()
+            // The latch, not the catalogue: the groups depend on the server's
+            // feature flags and the player's operator permission, so the next
+            // connection has to re-ask -- but the list it replaces stays on screen
+            // until the answer lands rather than blanking the picker.
+            creativeRequested = false
             // Keep assetCache -- the mod re-sends the bundle on reconnect, and
             // holding the old bitmaps avoids the HUD flashing back to
             // placeholders in between. Misses are cleared so a re-send can
@@ -493,6 +742,7 @@ class HudRepository(private val scope: CoroutineScope) {
                 "bindings" -> handleBindingsResponse(json)
                 "chat" -> handleChatResponse(json)
                 "container" -> handleContainerResponse(json)
+                "creative" -> handleCreativeResponse(json)
                 "noplayer" -> handleNoPlayer()
                 "hello" -> handleHello(json)
                 else -> handleHudState(json)
@@ -571,6 +821,36 @@ class HudRepository(private val scope: CoroutineScope) {
     /** Asks the mod to re-send the key bindings -- worth doing whenever the
      *  picker opens, since a rebind in game pushes nothing on its own. */
     fun requestBindings() = sendCommand("BINDINGS")
+
+    /**
+     * Asks for the creative item catalogue, once.
+     *
+     * Called from composition, so it must tolerate being hit every frame -- same
+     * constraint as [requestIcon], and the same shape of answer. The latch is
+     * cleared on disconnect rather than never, so a reconnect re-asks: the
+     * catalogue depends on the server's feature flags and the player's operator
+     * permission, both of which can differ on the next world.
+     */
+    fun requestCreative() {
+        if (creativeRequested || writer == null) return
+        creativeRequested = true
+        sendCommand("CREATIVE")
+    }
+
+    /**
+     * Hands the player an item. Creative only; the mod refuses it otherwise rather
+     * than trusting the app to know the game mode at the moment of the tap.
+     */
+    /**
+     * Hands the player an item.
+     *
+     * [hotbarSlot] is 0..8 and comes from the drag-onto-the-hotbar gesture; null
+     * means "wherever there's room", which is what a plain tap wants. The *handler*
+     * index arithmetic (hotbar is 36..44 there, 0..8 in the inventory) is
+     * deliberately left to the mod, same split as the slot roles.
+     */
+    fun sendGive(itemId: String, hotbarSlot: Int? = null) =
+        sendCommand(if (hotbarSlot == null) "GIVE:$itemId" else "GIVE:$itemId,$hotbarSlot")
 
     /**
      * One chat line, as coloured runs.
@@ -655,7 +935,20 @@ class HudRepository(private val scope: CoroutineScope) {
                 add(
                     ContainerSlot(
                         stack = parseSlot(entry.getJSONObject("stack")),
-                        mayPlace = entry.optBoolean("mayPlace", true)
+                        mayPlace = entry.optBoolean("mayPlace", true),
+                        // -1 rather than 0 for "absent": (0,0) is a position a
+                        // handler could legitimately place a slot at, so a
+                        // zero default would read as a real coordinate and
+                        // stack every slot of an old mod build's container in
+                        // the top-left corner.
+                        x = entry.optInt("x", -1),
+                        y = entry.optInt("y", -1),
+                        // The mod omits the field entirely for the great
+                        // majority of slots, which have no placeholder.
+                        background = entry.optString("background").ifEmpty { null },
+                        // Sent inverted, and only when true: "disabled" is the
+                        // exception worth a field, "enabled" is the default.
+                        enabled = !entry.optBoolean("disabled", false)
                     )
                 )
             }
@@ -664,14 +957,140 @@ class HudRepository(private val scope: CoroutineScope) {
         _container.value = ContainerState(
             syncId = json.getInt("syncId"),
             handlerType = if (json.isNull("handlerType")) null else json.optString("handlerType"),
+            title = if (json.isNull("title")) null else json.optString("title").ifEmpty { null },
+            screenOpen = json.optBoolean("screenOpen", false),
+            creativeScreen = json.optBoolean("creativeScreen", false),
             cursor = parseSlot(json.getJSONObject("cursor")),
             slots = slots,
             playerStart = json.getInt("playerStart"),
             hotbarStart = json.getInt("hotbarStart"),
             armorStart = json.getInt("armorStart"),
-            offhandIndex = json.getInt("offhandIndex")
+            offhandIndex = json.getInt("offhandIndex"),
+            progress = json.optJSONObject("progress")?.let(::parseContainerProgress),
+            extras = json.optJSONObject("extras")
+                ?.let(::parseContainerExtras)
+                // An extras object with nothing this build understands reads as
+                // no extras at all, rather than as an empty panel eating half the
+                // screen -- which is what a newer mod adding a sixth kind would
+                // otherwise do here.
+                ?.takeUnless { it.isEmpty }
         )
     }
+
+    /**
+     * The creative item catalogue.
+     *
+     * Arrives once per request. Replaces whatever was held rather than merging:
+     * the groups depend on the server's feature flags, so a second world's answer
+     * is the authority and a stale group would offer items the server refuses.
+     */
+    private fun handleCreativeResponse(json: JSONObject) {
+        val groups = json.optJSONArray("groups").mapObjects { group ->
+            val items = group.optJSONArray("items")
+            CreativeGroup(
+                id = group.optString("id"),
+                name = group.optString("name"),
+                icon = if (group.isNull("icon")) null else group.optString("icon").ifEmpty { null },
+                items = if (items == null) emptyList()
+                else (0 until items.length()).map { items.getString(it) }
+            )
+        }
+        _creativeGroups.value = groups
+        Log.i(TAG, "Creative catalogue: ${groups.size} groups, " +
+            "${groups.sumOf { it.items.size }} items")
+    }
+
+    /** Each kind is absent unless the open handler is that kind, so every field is
+     *  a nullable lookup rather than a branch on a discriminator. */
+    private fun parseContainerExtras(json: JSONObject) = ContainerExtras(
+        enchanting = json.optJSONObject("enchanting")?.let { obj ->
+            EnchantingOffers(
+                offers = obj.optJSONArray("offers").mapObjects { offer ->
+                    EnchantOffer(
+                        level = offer.optInt("level"),
+                        cost = offer.optInt("cost"),
+                        lapisCost = offer.optInt("lapisCost"),
+                        name = offer.optString("name"),
+                        available = offer.optBoolean("available", false)
+                    )
+                },
+                lapisCount = obj.optInt("lapisCount"),
+                playerLevel = obj.optInt("playerLevel")
+            )
+        },
+        stonecutter = json.optJSONObject("stonecutter")?.let(::parseSelectableList),
+        loom = json.optJSONObject("loom")?.let(::parseSelectableList),
+        merchant = json.optJSONObject("merchant")?.let { obj ->
+            MerchantTrades(
+                trades = obj.optJSONArray("trades").mapObjects { trade ->
+                    VillagerTrade(
+                        firstCost = parseSlot(trade.getJSONObject("firstCost")),
+                        secondCost = parseSlot(trade.getJSONObject("secondCost")),
+                        sell = parseSlot(trade.getJSONObject("sell")),
+                        disabled = trade.optBoolean("disabled", false),
+                        uses = trade.optInt("uses"),
+                        maxUses = trade.optInt("maxUses")
+                    )
+                },
+                experience = obj.optInt("experience"),
+                levelProgress = obj.optInt("levelProgress"),
+                leveled = obj.optBoolean("leveled", false)
+            )
+        },
+        beacon = json.optJSONObject("beacon")?.let { obj ->
+            BeaconState(
+                primaryOptions = obj.optJSONArray("primaryOptions").mapObjects(::parseBeaconEffect),
+                secondaryOptions = obj.optJSONArray("secondaryOptions").mapObjects(::parseBeaconEffect),
+                // Null is a real state -- a beacon with nothing chosen yet.
+                primary = if (obj.isNull("primary")) null else obj.optString("primary"),
+                secondary = if (obj.isNull("secondary")) null else obj.optString("secondary"),
+                level = obj.optInt("level"),
+                hasPayment = obj.optBoolean("hasPayment", false)
+            )
+        },
+        anvil = json.optJSONObject("anvil")?.let { obj ->
+            AnvilState(
+                levelCost = obj.optInt("levelCost"),
+                hasResult = obj.optBoolean("hasResult", false)
+            )
+        }
+    )
+
+    private fun parseSelectableList(json: JSONObject) = SelectableList(
+        options = json.optJSONArray("options").mapObjects { option ->
+            ContainerOption(
+                label = option.optString("label"),
+                // Absent for a loom's patterns, which aren't items.
+                itemId = option.optString("itemId").ifEmpty { null }
+            )
+        },
+        selected = json.optInt("selected", -1)
+    )
+
+    private fun parseBeaconEffect(json: JSONObject) = BeaconEffect(
+        id = json.optString("id"),
+        name = json.optString("name"),
+        tier = json.optInt("tier")
+    )
+
+    /** A null array reads as empty — the mod omits a list it has nothing for, and
+     *  every caller here wants "no entries" rather than a throw. */
+    private inline fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> {
+        if (this == null) return emptyList()
+        return (0 until length()).map { transform(getJSONObject(it)) }
+    }
+
+    /** Absent fields mean "this container has no such indicator", so every one
+     *  of them stays null rather than defaulting to zero — a furnace with a
+     *  `cookPixels` of 0 is idle, which is a different thing from a brewing
+     *  stand that has no cook arrow at all. */
+    private fun parseContainerProgress(json: JSONObject) = ContainerProgress(
+        cookPixels = if (json.has("cookPixels")) json.optInt("cookPixels") else null,
+        litPixels = if (json.has("litPixels")) json.optInt("litPixels") else null,
+        fuelPixels = if (json.has("fuelPixels")) json.optInt("fuelPixels") else null,
+        brewPixels = if (json.has("brewPixels")) json.optInt("brewPixels") else null,
+        brewing = json.optBoolean("brewing", false)
+    )
 
     /**
      * Clicks an inventory slot, exactly as a mouse would.
@@ -691,6 +1110,34 @@ class HudRepository(private val scope: CoroutineScope) {
      */
     fun sendSlotClick(syncId: Int, slotId: Int, button: Int = 0, action: String = "PICKUP") =
         sendCommand("SLOT:$syncId,$slotId,$button,$action")
+
+    /**
+     * The container commands that aren't slot clicks.
+     *
+     * The strings themselves are built by [ContainerCommands], which is
+     * Android-free and unit tested — these are the ones where a formatting slip
+     * silently performs a *different* action on a live world (the wrong enchant
+     * row, the wrong trade, a cleared beacon) rather than failing visibly.
+     *
+     * [syncId] is the same staleness check every container command carries: the
+     * mod refuses the command if the open handler has changed underneath, which
+     * matters more here than for a slot click, since "recipe 4" in whatever
+     * replaced the stonecutter is not a recipe at all.
+     */
+    fun sendButton(syncId: Int, buttonId: Int) =
+        sendCommand(ContainerCommands.button(syncId, buttonId))
+
+    fun sendRename(syncId: Int, name: String) =
+        sendCommand(ContainerCommands.rename(syncId, name))
+
+    fun sendTrade(syncId: Int, index: Int) =
+        sendCommand(ContainerCommands.trade(syncId, index))
+
+    fun sendBeaconEffects(syncId: Int, primary: String?, secondary: String?) =
+        sendCommand(ContainerCommands.beaconEffects(syncId, primary, secondary))
+
+    fun sendSlotState(syncId: Int, slotId: Int, enabled: Boolean) =
+        sendCommand(ContainerCommands.slotState(syncId, slotId, enabled))
 
     /**
      * Says [message] in game, as the player. A leading `/` makes it a command;

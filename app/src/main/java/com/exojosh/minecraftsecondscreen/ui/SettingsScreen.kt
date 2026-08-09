@@ -1,15 +1,19 @@
 package com.exojosh.minecraftsecondscreen.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -23,19 +27,41 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.exojosh.minecraftsecondscreen.net.GameBinding
+import com.exojosh.minecraftsecondscreen.net.ResourcePackIconProvider
+import com.exojosh.minecraftsecondscreen.settings.BackgroundSettings
 import com.exojosh.minecraftsecondscreen.settings.ChatSettings
+import com.exojosh.minecraftsecondscreen.settings.ContainerKind
+import com.exojosh.minecraftsecondscreen.settings.ContainerSettings
+import com.exojosh.minecraftsecondscreen.settings.HudBackground
 import com.exojosh.minecraftsecondscreen.settings.HudElement
 import com.exojosh.minecraftsecondscreen.settings.HudSettings
 import com.exojosh.minecraftsecondscreen.settings.INPUT_SLOT_COUNT
 import com.exojosh.minecraftsecondscreen.settings.InputSettings
 
+/**
+ * Every container toggle means the same thing, so they share one line rather
+ * than each inventing a sentence about itself. The list is long enough that
+ * fifteen near-identical descriptions would be harder to scan, not easier.
+ */
+private const val CONTAINER_TOGGLE_DESCRIPTION =
+    "Switch to Items when this opens, and back when it closes"
+
 /** Reset/Cancel: a game button, but not a thumb-sized one — these sit in a
  *  header beside text, not in a row of controls being aimed at. */
 private val SMALL_BUTTON_HEIGHT = 32.dp
+
+/** Big enough to read a 16x16 texture's pattern at a glance, small enough that
+ *  all nine fit without scrolling on the Thor's panel. */
+private val SWATCH_SIZE = 46.dp
 
 private val ROW_BACKGROUND = Color.Black.copy(alpha = 0.35f)
 private val SECONDARY_TEXT = Color(0xFF9A9A9A)
@@ -68,6 +94,10 @@ fun SettingsScreen(
     settings: HudSettings,
     inputSettings: InputSettings,
     chatSettings: ChatSettings,
+    containerSettings: ContainerSettings,
+    backgroundSettings: BackgroundSettings,
+    /** For the background swatches, which draw the real textures. */
+    iconProvider: ResourcePackIconProvider,
     bindings: List<GameBinding>,
     onRequestBindings: () -> Unit
 ) {
@@ -114,6 +144,43 @@ fun SettingsScreen(
                 element = element,
                 checked = settings.isVisible(element),
                 onToggle = { settings.toggle(element) }
+            )
+        }
+
+        item {
+            SectionHeader(
+                title = "Background",
+                subtitle = "The block tiled behind everything on this screen",
+                onReset = if (backgroundSettings.isDefault) null else backgroundSettings::reset
+            )
+        }
+
+        item {
+            BackgroundPicker(
+                selected = backgroundSettings.background,
+                iconProvider = iconProvider,
+                onChoose = backgroundSettings::choose
+            )
+        }
+
+        item {
+            SectionHeader(
+                title = "Open the Items tab automatically",
+                // Says what "off" means, because the toggle otherwise reads as
+                // "disable this container" -- which it isn't. The panel stays
+                // reachable by hand either way; only the takeover stops.
+                subtitle = "Anything switched off still works — you just have to " +
+                    "tap Items yourself",
+                onReset = containerSettings::reset
+            )
+        }
+
+        items(ContainerKind.entries) { kind ->
+            SettingToggle(
+                label = kind.label,
+                description = CONTAINER_TOGGLE_DESCRIPTION,
+                checked = containerSettings.opensAutomatically(kind),
+                onToggle = { containerSettings.toggle(kind) }
             )
         }
 
@@ -191,6 +258,69 @@ private fun SectionHeader(title: String, subtitle: String, onReset: (() -> Unit)
  * handheld being poked with a thumb, and a bare `Switch` is a small target
  * against a 1240px-wide panel.
  */
+/**
+ * The backdrop choices, as swatches of the actual texture.
+ *
+ * **Swatches rather than a list of names**, which is the only reason this isn't
+ * another row of `SettingToggle`s: the thing being chosen is how the screen *looks*,
+ * and "Mossy cobblestone" tells you far less than seeing it. Tapping one applies it
+ * immediately — [BackgroundSettings] holds its value in Compose state, so the
+ * backdrop changes under the player's finger and the choice is made by looking
+ * rather than by guessing and going back.
+ *
+ * One tile each, scaled up, rather than a tiled patch. At this size a single 16x16
+ * tile is already recognisable, and tiling a thumbnail would just make nine tiny
+ * repeating patterns harder to tell apart than nine clear ones.
+ *
+ * A swatch whose texture hasn't arrived draws its name instead of an empty box, so
+ * a fresh connection (or a mod build predating the extra backdrops) still shows a
+ * usable picker rather than a row of holes.
+ */
+@Composable
+private fun BackgroundPicker(
+    selected: HudBackground,
+    iconProvider: ResourcePackIconProvider,
+    onChoose: (HudBackground) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        items(HudBackground.entries) { background ->
+            val texture = iconProvider.getBackground(background)
+            Box(
+                modifier = Modifier
+                    .size(SWATCH_SIZE)
+                    // The name is the only text on a swatch, so it carries the
+                    // accessible label as well as the fallback.
+                    .semantics { contentDescription = background.label }
+                    .clickable { onChoose(background) },
+                contentAlignment = Alignment.Center
+            ) {
+                if (texture != null) {
+                    Image(
+                        bitmap = texture.asImageBitmap(),
+                        contentDescription = null,
+                        filterQuality = FilterQuality.None,
+                        contentScale = ContentScale.FillBounds,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Text(
+                        text = background.label,
+                        color = SECONDARY_TEXT,
+                        fontSize = 9.sp,
+                        modifier = Modifier.padding(2.dp)
+                    )
+                }
+                if (background == selected) {
+                    Box(modifier = Modifier.fillMaxSize().vanillaSlotHighlight())
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ElementToggle(
     element: HudElement,

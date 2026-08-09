@@ -9,6 +9,8 @@ import java.io.IOException
 import java.io.InputStream
 import java.util.zip.ZipInputStream
 
+import com.exojosh.minecraftsecondscreen.settings.HudBackground
+
 private const val TAG = "ResourcePackIcons"
 
 /** Where vanilla resource packs store the individual HUD sprite PNGs as of the
@@ -175,15 +177,66 @@ class ResourcePackIconProvider(
     fun getFontSheet(): Bitmap? =
         repository?.assetCache?.get(HudIcon.FONT_ASCII) ?: loadAsset(FONT_SHEET_PATH)
 
-    /** The block texture tiled behind the HUD. */
+    /** The default block texture tiled behind the HUD — dirt, and the only one an
+     *  older mod build serves. */
     fun getBackground(): Bitmap? =
         repository?.assetCache?.get(HudIcon.BACKGROUND) ?: loadAsset(BACKGROUND_PATH)
+
+    /**
+     * The chosen backdrop texture, falling back to dirt.
+     *
+     * The fallback matters rather than being defensive boilerplate: the alternative
+     * backdrops postdate the original `background` key, so a mod build that predates
+     * them serves only dirt — and a player who had picked sand would otherwise get a
+     * blank screen after downgrading the mod half. Dirt is what they had before, so
+     * it's the right answer.
+     */
+    fun getBackground(background: HudBackground): Bitmap? =
+        repository?.assetCache?.get(background.assetKey) ?: getBackground()
 
     /** The paper sheet vanilla draws a held map on, used the same way behind
      *  the live map tile. Socket-only: it isn't under the hud/ sprite dir, so
      *  there's no bundled fallback candidate for it. */
     fun getMapBackground(): Bitmap? =
         repository?.assetCache?.get(HudIcon.MAP_BACKGROUND) ?: loadAsset(MAP_BACKGROUND_PATH)
+
+    /**
+     * A GUI sprite by its Minecraft sprite id, e.g.
+     * `minecraft:container/slot/brewing_fuel`.
+     *
+     * **This is the one texture lookup with no enum entry, on purpose.** Every
+     * other sprite here is one this app decided it wanted, so naming it in
+     * [HudIcon] is right. These are named by the *game*, at runtime: the mod
+     * reports whatever `Slot.getBackgroundSprite()` returned, and an enum can
+     * only ever list what someone thought to enumerate. So the id is converted
+     * to a catalog key by the same mechanical rule the mod registered it under
+     * (`HudAssetCatalog.putSprite`), and a sprite the catalog doesn't serve — a
+     * modded container's own placeholder — simply resolves to null and draws no
+     * ghost. That degrades the way everything else here does: appearance, not
+     * function.
+     */
+    fun getSpriteBitmap(spriteId: String?): Bitmap? {
+        if (spriteId == null) return null
+        val path = spriteId.substringAfter(':')
+        return repository?.assetCache?.get(path.replace('/', '_'))
+    }
+
+    /**
+     * A status effect's icon by its registry id, e.g. `minecraft:haste`.
+     *
+     * The beacon's picker used to label its buttons with effect *names*, which on
+     * a screen this size read as a wall of words where the game shows a row of
+     * recognisable icons. These are the game's own `textures/mob_effect/` sprites.
+     *
+     * Only the six a beacon can offer are served (see `HudAssetCatalog`), so an
+     * effect outside that set — a datapack adding one — resolves to null and the
+     * caller falls back to the name. Same graceful degradation as every other
+     * texture here.
+     */
+    fun getStatusEffectIcon(effectId: String?): Bitmap? {
+        if (effectId == null) return null
+        return repository?.assetCache?.get("mob_effect_" + effectId.substringAfter(':'))
+    }
 
     private fun loadIconFromAssets(icon: HudIcon): Bitmap? {
         Log.d(TAG, "Test, calling loadIconFromAssets")

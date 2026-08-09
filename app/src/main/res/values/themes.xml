@@ -2,4 +2,24 @@
 <resources>
 
     <style name="Theme.AYNThorSecondScreenMinecraftDisplay" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!--
+        MainActivity's own theme. The activity exists only to anchor the
+        Presentation on the bottom panel and to own the socket repository; it
+        draws nothing on the primary screen, which is the screen running
+        Minecraft. A translucent window means launching the app leaves whatever
+        was on the top screen visible instead of covering it with an opaque
+        blank sheet.
+
+        On a single-screen device MainActivity does render the real UI here as a
+        dev fallback. SecondScreenApp paints its own opaque backdrop, so
+        transparency costs that path nothing.
+    -->
+    <style name="Theme.AYNThorSecondScreenMinecraftDisplay.Host">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

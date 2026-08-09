@@ -33,22 +33,29 @@ data class InventoryGrid(val rows: List<InventoryRow>) {
  * The index roles come from the mod ([ContainerState.playerStart] and friends),
  * not from constants restated here — vanilla's own `PlayerScreenHandler`
  * constants live on that side and only that side.
+ *
+ * **This is now the *player's* half of the layout.** The container's own slots
+ * are placed by [ContainerLayout] from the coordinates the game reports, because
+ * a 9-wide grid is chest-shaped and nothing but a chest is — see that file. What
+ * stays here is the part a 9-wide grid genuinely fits: the player's 36 slots, and
+ * the armor/off-hand/crafting block of their own inventory screen.
  */
 object InventoryLayout {
 
     const val COLUMNS = 9
 
-    fun compute(state: ContainerState): InventoryGrid {
+    /**
+     * The player's own rows: their equipment block when this *is* their
+     * inventory screen, then the main three rows, then the hotbar.
+     *
+     * Split out from [compute] so [ContainerLayout] can stack these under a
+     * container region it placed by coordinate, without this having to know
+     * anything about how that was done.
+     */
+    fun playerRows(state: ContainerState): List<InventoryRow> {
         val rows = mutableListOf<InventoryRow>()
 
-        if (state.isPlayerInventory) {
-            rows += equipmentRows(state)
-        } else {
-            // Anything else: the container's own slots, in rows of 9, above the
-            // player's. A furnace's 3 slots make one short row, which is
-            // correct — it just isn't vanilla's furnace *shape*.
-            rows += chunkRows(state.containerRange.toList(), InventoryRowKind.CONTAINER)
-        }
+        if (state.isPlayerInventory) rows += equipmentRows(state)
 
         // The off-hand is excluded from the trailing range, not just placed
         // separately. On the player's handler it is slot 45 — *after* the
@@ -65,6 +72,26 @@ object InventoryLayout {
             (state.hotbarStart until state.slots.size).filter { it != skip },
             InventoryRowKind.HOTBAR
         )
+
+        return rows
+    }
+
+    /**
+     * The whole handler as rows, container region included, on one 9-wide grid.
+     *
+     * Superseded by [ContainerLayout.plan] for drawing — a container's slots are
+     * placed by vanilla's coordinates now — and kept because the row form is
+     * still the honest description of the player's half, and because
+     * `InventoryLayoutTest` pins the off-hand and equipment index arithmetic
+     * through it.
+     */
+    fun compute(state: ContainerState): InventoryGrid {
+        val rows = mutableListOf<InventoryRow>()
+
+        if (!state.isPlayerInventory) {
+            rows += chunkRows(state.containerRange.toList(), InventoryRowKind.CONTAINER)
+        }
+        rows += playerRows(state)
 
         return InventoryGrid(rows)
     }
