@@ -5,21 +5,26 @@ Thor Minecraft HUD - Native Linux Second-Screen Companion for AYN Thor
 Connects to the AYN Thor Minecraft Second Screen Fabric/Forge mod over local loopback
 TCP (127.0.0.1:48291) and renders the actual Minecraft GUI on the Thor's bottom display (1240x1080).
 
-Modes:
-1. Roaming Mode:
-   - Live 128x128 Minimap with paper parchment background, player position marker and yaw rotation
-   - Player coordinates and compass orientation
-   - Vitals: Vanilla health hearts (normal, absorption, poison, wither), armor, hunger, air bubbles, XP bar
-   - Hotbar with authentic vanilla textures, items, counts, durability bars, offhand slot
-   - Quick action buttons (INV, DROP, SWAP, CHAT, ESC)
+Features:
+1. Roaming Mode (1240x1080 optimized):
+   - 480x480 Live Minimap with parchment paper background, player position & yaw orientation
+   - Target Inspector (The One Probe / Jade style block & mob HUD)
+   - TACZ Gun HUD (Firearm name, ammo count, capacity meter, fire mode, reserve ammo)
+   - LSO Survival HUD (Hydration/thirst bar, temperature gauge & status)
+   - ParCool Stamina bar
+   - Inventory HUD+ style equipped armor durability & active potion effect badges
+   - AppleSkin food saturation & exhaustion overlay
+   - Centered Vanilla vitals (hearts, absorption, armor/toughness, air bubbles, XP bar)
+   - 9-slot touch hotbar with authentic textures, counts, and durability meters
+   - 6 customizable touch hotkeys with in-app settings modal
 
 2. Container / Inventory Mode:
-   - Automatically activates when player opens inventory, chest, furnace, crafting table, or mod container
-   - Top screen suppresses container rendering for clean 3D gameplay view
-   - Bottom screen renders full interactive container slot grid + player inventory + hotbar
-   - Touch slot interaction: Normal pickup/place and Shift-click quick move toggle
-   - Carried cursor item badge and drop-to-world control
-   - Close button to return to Roaming mode
+   - Activates automatically on opening chests, inventories, furnaces, or mod containers
+   - Touch slot interaction (Tap pickup/place and Quick-Move mode toggle)
+   - Clickable Sorting Mod elements (Quark Sort, Restock, Deposit, master [⚡ SORT INV] & [⚡ SORT CHEST])
+   - Carried cursor item badge + world drop control
+   - Live vitals & ammo status bar visible while managing containers
+   - Bottom hotkeys bar with [CLOSE [E]] to seamlessly close containers
 """
 
 import os
@@ -50,12 +55,60 @@ RECONNECT_INTERVAL = 1.5
 DEFAULT_WIDTH = 1240
 DEFAULT_HEIGHT = 1080
 
+CONFIG_DIR = os.path.expanduser("~/.config/thor-mc-hud")
+HOTKEYS_FILE = os.path.join(CONFIG_DIR, "hotkeys.json")
+
+DEFAULT_HOTKEYS = [
+    {"label": "INV [E]", "cmd": "E"},
+    {"label": "DROP [Q]", "cmd": "Q"},
+    {"label": "SWAP [F]", "cmd": "F"},
+    {"label": "SORT", "cmd": "SORT"},
+    {"label": "MAP [M]", "cmd": "M"},
+    {"label": "PAUSE", "cmd": "ESCAPE"}
+]
+
+HOTKEY_PRESETS = [
+    ("INV [E]", "E"),
+    ("DROP [Q]", "Q"),
+    ("SWAP [F]", "F"),
+    ("SORT", "SORT"),
+    ("CHAT [T]", "T"),
+    ("MAP [M]", "M"),
+    ("PAUSE [ESC]", "ESCAPE"),
+    ("DEBUG [F3]", "F3"),
+    ("CAMERA [F5]", "F5"),
+    ("SPRINT", "SPRINT"),
+    ("SNEAK", "SNEAK"),
+    ("JUMP", "JUMP"),
+    ("TAB LIST", "TAB"),
+    ("QUICK MOVE", "TOGGLE_SHIFT")
+]
+
 CLIENT_JAR_SEARCH_PATHS = [
     "/var/home/armada/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/minecraft/1.20.1/minecraft-1.20.1-client.jar",
     "/var/home/armada/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/libraries/com/mojang/minecraft/*/minecraft-*-client.jar",
     "/var/home/armada/.local/share/PrismLauncher/libraries/com/mojang/minecraft/*/minecraft-*-client.jar",
     "/var/home/armada/.minecraft/versions/*/*.jar",
 ]
+
+def load_hotkeys():
+    try:
+        if os.path.exists(HOTKEYS_FILE):
+            with open(HOTKEYS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list) and len(data) == 6:
+                    return data
+    except Exception as e:
+        print(f"[ThorHud] Error loading hotkeys: {e}")
+    return list(DEFAULT_HOTKEYS)
+
+def save_hotkeys(hotkeys):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(HOTKEYS_FILE, "w", encoding="utf-8") as f:
+            json.dump(hotkeys, f, indent=2)
+    except Exception as e:
+        print(f"[ThorHud] Error saving hotkeys: {e}")
 
 class HotbarSlot:
     def __init__(self, item_id="minecraft:air", count=0, damage=0, max_damage=0, has_glint=False):
@@ -78,6 +131,9 @@ class HudState:
         self.absorption = 0.0
         self.food = 20
         self.armor = 0
+        self.armor_toughness = 0.0
+        self.saturation = 5.0
+        self.exhaustion = 0.0
         self.air = 300
         self.xp_level = 0
         self.xp_progress = 0.0
@@ -89,6 +145,13 @@ class HudState:
         self.withered = False
         self.freezing = False
         self.chat_lines = []
+
+        # Mod & Extended Elements
+        self.gun = None
+        self.survival = None
+        self.target = None
+        self.effects = []
+        self.armor_slots = []
 
 def draw_sprite(cr, surface, sx, sy, sw, sh, dx, dy, scale):
     """Draw a sub-rectangle of a surface with nearest-neighbor pixel scaling."""
@@ -133,11 +196,17 @@ class ThorMcHud(Gtk.Window):
         self.map_tile = None
         self.shift_click_mode = False
 
+        # Hotkeys configuration
+        self.hotkeys = load_hotkeys()
+        self.settings_open = False
+        self.selected_hotkey_slot = 0
+
         # Hit-testing rects
         self.slot_rects = []
         self.action_btns = []
         self.container_slot_rects = []
         self.container_action_btns = []
+        self.settings_action_btns = []
 
         # Texture surfaces
         self.icons_surface = None
@@ -169,7 +238,7 @@ class ThorMcHud(Gtk.Window):
             self.net_thread.start()
 
         # 60fps refresh timer
-        GLib.timeout_add(50, self.tick_redraw)
+        GLib.timeout_add(33, self.tick_redraw)
 
     def load_minecraft_textures(self):
         """Locates the Minecraft client jar and extracts icons.png, widgets.png, map_background.png."""
@@ -316,7 +385,7 @@ class ThorMcHud(Gtk.Window):
                     print(f"Error decoding icon for {item_id}: {ex}")
             return
 
-        # 5. Standard HudState snapshot
+        # 5. Standard & Mod HudState snapshot
         with self.lock:
             if "health" in msg:
                 self.state.health = float(msg.get("health", 20.0))
@@ -328,6 +397,12 @@ class ThorMcHud(Gtk.Window):
                 self.state.food = int(msg.get("food", 20))
             if "armor" in msg:
                 self.state.armor = int(msg.get("armor", 0))
+            if "armorToughness" in msg:
+                self.state.armor_toughness = float(msg.get("armorToughness", 0.0))
+            if "saturation" in msg:
+                self.state.saturation = float(msg.get("saturation", 0.0))
+            if "exhaustion" in msg:
+                self.state.exhaustion = float(msg.get("exhaustion", 0.0))
             if "air" in msg:
                 self.state.air = int(msg.get("air", 300))
             if "xpLevel" in msg:
@@ -340,6 +415,18 @@ class ThorMcHud(Gtk.Window):
                 self.state.poisoned = bool(msg.get("poisoned", False))
             if "withered" in msg:
                 self.state.withered = bool(msg.get("withered", False))
+
+            # Mod HUD elements
+            if "gun" in msg:
+                self.state.gun = msg.get("gun")
+            if "survival" in msg:
+                self.state.survival = msg.get("survival")
+            if "target" in msg:
+                self.state.target = msg.get("target")
+            if "effects" in msg:
+                self.state.effects = msg.get("effects", [])
+            if "armorSlots" in msg:
+                self.state.armor_slots = msg.get("armorSlots", [])
 
             if "hotbar" in msg and isinstance(msg["hotbar"], list):
                 new_hotbar = []
@@ -380,6 +467,35 @@ class ThorMcHud(Gtk.Window):
         return True
 
     def handle_pointer_interaction(self, x, y, button=1):
+        # 0. Hotkey Settings Modal Interaction (Intercepts all clicks when open)
+        if self.settings_open:
+            for bx, by, bw, bh, cmd, val in self.settings_action_btns:
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    if cmd == "CLOSE_SETTINGS":
+                        self.settings_open = False
+                        save_hotkeys(self.hotkeys)
+                    elif cmd == "RESET_SETTINGS":
+                        self.hotkeys = list(DEFAULT_HOTKEYS)
+                        save_hotkeys(self.hotkeys)
+                    elif cmd == "SELECT_SLOT":
+                        self.selected_hotkey_slot = int(val)
+                    elif cmd == "ASSIGN_PRESET":
+                        preset_label, preset_cmd = val
+                        self.hotkeys[self.selected_hotkey_slot] = {
+                            "label": preset_label,
+                            "cmd": preset_cmd
+                        }
+                        save_hotkeys(self.hotkeys)
+                    return
+            # Tap outside settings box closes it
+            return
+
+        # Check Hotkeys Settings Button in Header (present in both Roaming and Container)
+        for bx, by, bw, bh, cmd in self.action_btns:
+            if cmd == "OPEN_SETTINGS" and bx <= x <= bx + bw and by <= y <= by + bh:
+                self.settings_open = True
+                return
+
         # Container Mode Interactions
         is_container_open = False
         with self.lock:
@@ -387,16 +503,31 @@ class ThorMcHud(Gtk.Window):
                 is_container_open = True
 
         if is_container_open:
-            # Check container action buttons
+            # Check container action buttons & mod widgets
             for bx, by, bw, bh, cmd in self.container_action_btns:
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    if cmd == "TOGGLE_SHIFT":
+                    if cmd == "OPEN_SETTINGS":
+                        self.settings_open = True
+                    elif cmd == "TOGGLE_SHIFT":
                         self.shift_click_mode = not self.shift_click_mode
-                    elif cmd == "CLOSE":
+                    elif cmd == "CLOSE" or cmd == "CLOSE_CONTAINER" or cmd == "E":
                         self.send_command("CLOSE_CONTAINER")
                     elif cmd == "DROP_HELD":
                         sync_id = self.current_container.get("syncId", 0)
                         self.send_command(f"SLOT:{sync_id},-999,0,PICKUP")
+                    elif cmd.startswith("WIDGET:") or cmd == "SORT":
+                        self.send_command(cmd)
+                    return
+
+            # Check bottom hotkeys while in container mode (allows closing or sorting from bottom bar)
+            for bx, by, bw, bh, label, cmd in self.action_btns:
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    if cmd == "E" or cmd == "ESCAPE" or cmd == "CLOSE":
+                        self.send_command("CLOSE_CONTAINER")
+                    elif cmd == "TOGGLE_SHIFT":
+                        self.shift_click_mode = not self.shift_click_mode
+                    else:
+                        self.send_command(cmd)
                     return
 
             # Check container slot clicks
@@ -418,7 +549,10 @@ class ThorMcHud(Gtk.Window):
 
         for bx, by, bw, bh, label, cmd in self.action_btns:
             if bx <= x <= bx + bw and by <= y <= by + bh:
-                self.send_command(cmd)
+                if cmd == "TOGGLE_SHIFT":
+                    self.shift_click_mode = not self.shift_click_mode
+                else:
+                    self.send_command(cmd)
                 return
 
     def on_draw(self, widget, cr):
@@ -441,6 +575,10 @@ class ThorMcHud(Gtk.Window):
         else:
             self.draw_roaming_screen(cr, W, H)
 
+        # Draw Settings Modal Overlay if open
+        if self.settings_open:
+            self.draw_settings_modal(cr, W, H)
+
     # -------------------------------------------------------------------------
     # CONTAINER SCREEN RENDERING
     # -------------------------------------------------------------------------
@@ -455,11 +593,12 @@ class ThorMcHud(Gtk.Window):
         cursor = container.get("cursor", {})
         cursor_item = cursor.get("itemId", "minecraft:air")
         cursor_count = cursor.get("count", 0)
+        widgets = container.get("widgets", [])
 
         # 1. Top Header & Control Bar
-        header_y = 20
-        header_h = 58
-        margin_x = 40
+        header_y = 16
+        header_h = 54
+        margin_x = 36
         header_w = W - 2 * margin_x
 
         cr.set_source_rgba(0.12, 0.14, 0.18, 0.95)
@@ -474,97 +613,152 @@ class ThorMcHud(Gtk.Window):
         cr.set_source_rgb(1.0, 0.85, 0.2)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(20)
-        cr.move_to(margin_x + 24, header_y + 36)
+        cr.move_to(margin_x + 20, header_y + 35)
         cr.show_text(title.upper())
 
-        # Touch Mode Button (Normal vs Shift Quick-Move)
-        mode_btn_w = 200
-        mode_btn_h = 42
-        mode_btn_x = margin_x + 300
-        mode_btn_y = header_y + 8
-        self.container_action_btns.append((mode_btn_x, mode_btn_y, mode_btn_w, mode_btn_h, "TOGGLE_SHIFT"))
-
-        if self.shift_click_mode:
-            cr.set_source_rgb(0.2, 0.6, 0.3)
-        else:
-            cr.set_source_rgb(0.22, 0.24, 0.30)
-        cr.rectangle(mode_btn_x, mode_btn_y, mode_btn_w, mode_btn_h)
+        # Settings button [⚙ HOTKEYS] in header
+        sett_btn_w = 120
+        sett_btn_h = 40
+        sett_btn_x = margin_x + header_w - 230
+        sett_btn_y = header_y + 7
+        self.container_action_btns.append((sett_btn_x, sett_btn_y, sett_btn_w, sett_btn_h, "OPEN_SETTINGS"))
+        cr.set_source_rgb(0.22, 0.25, 0.32)
+        cr.rectangle(sett_btn_x, sett_btn_y, sett_btn_w, sett_btn_h)
         cr.fill()
-        cr.set_source_rgb(0.9, 0.95, 1.0)
-        cr.set_font_size(14)
-        mode_lbl = "MODE: QUICK-MOVE [ON]" if self.shift_click_mode else "MODE: NORMAL TAP"
-        ext = cr.text_extents(mode_lbl)
-        cr.move_to(mode_btn_x + (mode_btn_w - ext.width) / 2.0, mode_btn_y + 26)
-        cr.show_text(mode_lbl)
-
-        # Carried Cursor Item Badge
-        if cursor_item != "minecraft:air":
-            held_w = 260
-            held_x = mode_btn_x + mode_btn_w + 20
-            held_y = mode_btn_y
-            cr.set_source_rgba(0.2, 0.15, 0.05, 0.9)
-            cr.rectangle(held_x, held_y, held_w, mode_btn_h)
-            cr.fill()
-            cr.set_source_rgb(1.0, 0.7, 0.1)
-            cr.rectangle(held_x, held_y, held_w, mode_btn_h)
-            cr.stroke()
-
-            # Item icon & text
-            cur_short = cursor_item.split(":")[-1].replace("_", " ")[:12]
-            cr.set_source_rgb(1.0, 1.0, 1.0)
-            cr.set_font_size(14)
-            cr.move_to(held_x + 12, held_y + 26)
-            cr.show_text(f"Holding: {cur_short} x{cursor_count}")
-
-            # Drop button
-            drop_btn_w = 90
-            drop_btn_x = held_x + held_w + 12
-            self.container_action_btns.append((drop_btn_x, held_y, drop_btn_w, mode_btn_h, "DROP_HELD"))
-            cr.set_source_rgb(0.5, 0.15, 0.15)
-            cr.rectangle(drop_btn_x, held_y, drop_btn_w, mode_btn_h)
-            cr.fill()
-            cr.set_source_rgb(1.0, 1.0, 1.0)
-            cr.move_to(drop_btn_x + 16, held_y + 26)
-            cr.show_text("DROP")
+        cr.set_source_rgb(0.9, 0.92, 0.96)
+        cr.set_font_size(13)
+        ext = cr.text_extents("⚙ HOTKEYS")
+        cr.move_to(sett_btn_x + (sett_btn_w - ext.width) / 2.0, sett_btn_y + 25)
+        cr.show_text("⚙ HOTKEYS")
 
         # Close [X] Button (top right)
         close_btn_w = 90
-        close_btn_h = 42
+        close_btn_h = 40
         close_btn_x = margin_x + header_w - close_btn_w - 8
-        close_btn_y = header_y + 8
+        close_btn_y = header_y + 7
         self.container_action_btns.append((close_btn_x, close_btn_y, close_btn_w, close_btn_h, "CLOSE"))
-        cr.set_source_rgb(0.65, 0.18, 0.18)
+        cr.set_source_rgb(0.70, 0.18, 0.18)
         cr.rectangle(close_btn_x, close_btn_y, close_btn_w, close_btn_h)
         cr.fill()
         cr.set_source_rgb(1.0, 1.0, 1.0)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(16)
+        cr.set_font_size(15)
         ext = cr.text_extents("CLOSE [X]")
-        cr.move_to(close_btn_x + (close_btn_w - ext.width) / 2.0, close_btn_y + 26)
+        cr.move_to(close_btn_x + (close_btn_w - ext.width) / 2.0, close_btn_y + 25)
         cr.show_text("CLOSE [X]")
 
-        # 2. Container Slots Layout
+        # 2. Sorting & Action Toolbar (below header)
+        toolbar_y = 78
+        toolbar_h = 48
+        cr.set_source_rgba(0.10, 0.12, 0.16, 0.9)
+        cr.rectangle(margin_x, toolbar_y, header_w, toolbar_h)
+        cr.fill()
+        cr.set_source_rgba(0.22, 0.26, 0.34, 0.8)
+        cr.set_line_width(1.5)
+        cr.rectangle(margin_x, toolbar_y, header_w, toolbar_h)
+        cr.stroke()
+
+        tb_cur_x = margin_x + 12
+
+        # Touch Mode Button (Normal vs Shift Quick-Move)
+        mode_btn_w = 180
+        mode_btn_h = 36
+        mode_btn_y = toolbar_y + 6
+        self.container_action_btns.append((tb_cur_x, mode_btn_y, mode_btn_w, mode_btn_h, "TOGGLE_SHIFT"))
+        if self.shift_click_mode:
+            cr.set_source_rgb(0.2, 0.65, 0.3)
+        else:
+            cr.set_source_rgb(0.24, 0.26, 0.32)
+        cr.rectangle(tb_cur_x, mode_btn_y, mode_btn_w, mode_btn_h)
+        cr.fill()
+        cr.set_source_rgb(1.0, 1.0, 1.0)
+        cr.set_font_size(12)
+        mode_lbl = "⚡ QUICK-MOVE: ON" if self.shift_click_mode else "TAP: NORMAL MOVE"
+        ext = cr.text_extents(mode_lbl)
+        cr.move_to(tb_cur_x + (mode_btn_w - ext.width) / 2.0, mode_btn_y + 23)
+        cr.show_text(mode_lbl)
+        tb_cur_x += mode_btn_w + 14
+
+        # Master Sort Inventory Button
+        sort_btn_w = 120
+        self.container_action_btns.append((tb_cur_x, mode_btn_y, sort_btn_w, mode_btn_h, "SORT"))
+        cr.set_source_rgb(0.28, 0.42, 0.65)
+        cr.rectangle(tb_cur_x, mode_btn_y, sort_btn_w, mode_btn_h)
+        cr.fill()
+        cr.set_source_rgb(1.0, 1.0, 1.0)
+        cr.set_font_size(12)
+        ext = cr.text_extents("⚡ SORT INV")
+        cr.move_to(tb_cur_x + (sort_btn_w - ext.width) / 2.0, mode_btn_y + 23)
+        cr.show_text("⚡ SORT INV")
+        tb_cur_x += sort_btn_w + 14
+
+        # Detected Mod Widgets (Quark / Sophisticated Backpacks / Sorting buttons)
+        for w in widgets:
+            w_id = w.get("id")
+            w_lbl = w.get("label") or "WIDGET"
+            if not w_lbl or w_lbl.strip() == "":
+                w_lbl = "SORT"
+            w_btn_w = 100
+            self.container_action_btns.append((tb_cur_x, mode_btn_y, w_btn_w, mode_btn_h, f"WIDGET:{w_id}"))
+            cr.set_source_rgb(0.32, 0.36, 0.48)
+            cr.rectangle(tb_cur_x, mode_btn_y, w_btn_w, mode_btn_h)
+            cr.fill()
+            cr.set_source_rgb(0.9, 0.95, 1.0)
+            cr.set_font_size(12)
+            lbl_text = f"📦 {w_lbl.upper()[:8]}"
+            ext = cr.text_extents(lbl_text)
+            cr.move_to(tb_cur_x + (w_btn_w - ext.width) / 2.0, mode_btn_y + 23)
+            cr.show_text(lbl_text)
+            tb_cur_x += w_btn_w + 10
+
+        # Carried Cursor Item Badge
+        if cursor_item != "minecraft:air":
+            held_w = 240
+            held_x = margin_x + header_w - held_w - 95
+            cr.set_source_rgba(0.22, 0.16, 0.05, 0.9)
+            cr.rectangle(held_x, mode_btn_y, held_w, mode_btn_h)
+            cr.fill()
+            cr.set_source_rgb(1.0, 0.7, 0.1)
+            cr.rectangle(held_x, mode_btn_y, held_w, mode_btn_h)
+            cr.stroke()
+
+            cur_short = cursor_item.split(":")[-1].replace("_", " ")[:10]
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.set_font_size(12)
+            cr.move_to(held_x + 10, mode_btn_y + 23)
+            cr.show_text(f"Holding: {cur_short} x{cursor_count}")
+
+            # Drop button
+            drop_btn_w = 75
+            drop_btn_x = held_x + held_w + 8
+            self.container_action_btns.append((drop_btn_x, mode_btn_y, drop_btn_w, mode_btn_h, "DROP_HELD"))
+            cr.set_source_rgb(0.55, 0.16, 0.16)
+            cr.rectangle(drop_btn_x, mode_btn_y, drop_btn_w, mode_btn_h)
+            cr.fill()
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.move_to(drop_btn_x + 16, mode_btn_y + 23)
+            cr.show_text("DROP")
+
+        # 3. Container Slots Layout (Scaled for touch & balanced vertically)
         player_start = container.get("playerStart", 9)
         hotbar_start = container.get("hotbarStart", 36)
         total_slots = len(slots)
 
-        cell_size = 56
-        cell_pitch = 60
+        cell_size = 64
+        cell_pitch = 70
         player_w = 9 * cell_pitch
         player_x = (W - player_w) / 2.0
 
-        # Draw container slots (if external container like chest, furnace, crafting)
         if player_start > 0:
             c_slots = slots[:player_start]
             c_cols = min(9, len(c_slots))
             c_rows = int(math.ceil(len(c_slots) / float(c_cols))) if c_cols > 0 else 0
             c_w = c_cols * cell_pitch
             c_x = (W - c_w) / 2.0
-            c_y = 100
+            c_y = 136
 
-            # Container region box
             cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
-            cr.rectangle(c_x - 12, c_y - 12, c_w + 24, (c_rows * cell_pitch) + 24)
+            cr.rectangle(c_x - 12, c_y - 10, c_w + 24, (c_rows * cell_pitch) + 20)
             cr.fill()
 
             for i, slot in enumerate(c_slots):
@@ -574,22 +768,20 @@ class ThorMcHud(Gtk.Window):
                 sy = c_y + row * cell_pitch
                 self.draw_container_slot(cr, sx, sy, cell_size, slot, i)
 
-            player_y = c_y + (c_rows * cell_pitch) + 36
+            player_y = c_y + (c_rows * cell_pitch) + 28
         else:
-            # Player inventory only: Draw armor and crafting block
-            player_y = 440
-            self.draw_player_equipment_block(cr, player_x, 110, cell_size, cell_pitch, slots)
+            player_y = 390
+            self.draw_player_equipment_block(cr, player_x, 136, cell_size, cell_pitch, slots)
 
-        # Draw Player 3x9 Main Inventory
+        # Player 3x9 Main Inventory
         cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
-        cr.rectangle(player_x - 12, player_y - 12, player_w + 24, (4 * cell_pitch) + 36)
+        cr.rectangle(player_x - 12, player_y - 10, player_w + 24, (4 * cell_pitch) + 32)
         cr.fill()
 
-        # Label
         cr.set_source_rgb(0.7, 0.75, 0.85)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(15)
-        cr.move_to(player_x, player_y - 18)
+        cr.set_font_size(14)
+        cr.move_to(player_x, player_y - 14)
         cr.show_text("INVENTORY")
 
         main_count = hotbar_start - player_start
@@ -604,11 +796,11 @@ class ThorMcHud(Gtk.Window):
             sy = player_y + row * cell_pitch
             self.draw_container_slot(cr, sx, sy, cell_size, slot, slot_idx)
 
-        # Draw 1x9 Hotbar (with small separation)
+        # 1x9 Hotbar
         hotbar_y = player_y + (3 * cell_pitch) + 12
         cr.set_source_rgb(0.7, 0.75, 0.85)
-        cr.set_font_size(15)
-        cr.move_to(player_x, hotbar_y - 18)
+        cr.set_font_size(14)
+        cr.move_to(player_x, hotbar_y - 14)
         cr.show_text("HOTBAR")
 
         hotbar_count = min(9, total_slots - hotbar_start)
@@ -619,60 +811,101 @@ class ThorMcHud(Gtk.Window):
             sy = hotbar_y
             self.draw_container_slot(cr, sx, sy, cell_size, slot, slot_idx)
 
+        # 4. Status & Vitals bar below container (lets player see health while looting)
+        vitals_bar_y = hotbar_y + cell_pitch + 16
+        self.draw_mini_vitals_bar(cr, player_x, vitals_bar_y, player_w)
+
+        # 5. Bottom Hotkeys Bar (with CLOSE [E] ready to exit container)
+        self.draw_quick_actions(cr, W, H, in_container=True)
+
+    def draw_mini_vitals_bar(self, cr, vx, vy, vw):
+        cr.set_source_rgba(0.10, 0.12, 0.15, 0.9)
+        cr.rectangle(vx - 12, vy, vw + 24, 42)
+        cr.fill()
+        cr.set_source_rgba(0.24, 0.28, 0.36, 0.8)
+        cr.set_line_width(1.5)
+        cr.rectangle(vx - 12, vy, vw + 24, 42)
+        cr.stroke()
+
+        # Health
+        cr.set_source_rgb(0.9, 0.2, 0.25)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(14)
+        cr.move_to(vx, vy + 26)
+        cr.show_text(f"❤ HP: {self.state.health:.0f}/{self.state.max_health:.0f}")
+
+        # Food & Saturation
+        cr.set_source_rgb(0.85, 0.55, 0.2)
+        cr.move_to(vx + 160, vy + 26)
+        cr.show_text(f"🍗 FOOD: {self.state.food}/20  (SAT: {self.state.saturation:.1f})")
+
+        # Armor & Toughness
+        cr.set_source_rgb(0.3, 0.7, 0.9)
+        cr.move_to(vx + 390, vy + 26)
+        cr.show_text(f"🛡 ARMOR: {self.state.armor}  (TOUGH: {self.state.armor_toughness:.0f})")
+
+        # Gun Ammo or XP
+        if self.state.gun and self.state.gun.get("active"):
+            g = self.state.gun
+            cr.set_source_rgb(1.0, 0.8, 0.2)
+            cr.move_to(vx + 560, vy + 26)
+            cr.show_text(f"🔫 {g.get('gunName', 'GUN')}: {g.get('ammo')}/{g.get('maxAmmo')} ({g.get('fireMode')})")
+        else:
+            cr.set_source_rgb(0.4, 0.9, 0.3)
+            cr.move_to(vx + 560, vy + 26)
+            cr.show_text(f"⭐ LEVEL: {self.state.xp_level}")
+
     def draw_player_equipment_block(self, cr, player_x, eq_y, cell_size, cell_pitch, slots):
-        # Armor slots: 4 vertical slots on the left
-        # Crafting grid: 2x2 + result on the right
         cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
-        cr.rectangle(player_x - 12, eq_y - 12, (9 * cell_pitch) + 24, (4 * cell_pitch) + 16)
+        cr.rectangle(player_x - 12, eq_y - 10, (9 * cell_pitch) + 24, (3 * cell_pitch) + 30)
         cr.fill()
 
         cr.set_source_rgb(0.7, 0.75, 0.85)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(15)
-        cr.move_to(player_x, eq_y - 18)
+        cr.set_font_size(14)
+        cr.move_to(player_x, eq_y - 14)
         cr.show_text("ARMOR & CRAFTING")
 
         armor_indices = [5, 6, 7, 8]  # Helmet, Chest, Legs, Boots
         for i, a_idx in enumerate(armor_indices):
             if a_idx < len(slots):
-                sx = player_x + 40
-                sy = eq_y + i * cell_pitch
+                sx = player_x + 20 + i * cell_pitch
+                sy = eq_y + 10
                 self.draw_container_slot(cr, sx, sy, cell_size, slots[a_idx], a_idx)
 
         # Offhand slot (slot 45)
         if len(slots) > 45:
-            off_x = player_x + 40 + cell_pitch + 16
-            off_y = eq_y + 3 * cell_pitch
+            off_x = player_x + 20 + 4 * cell_pitch + 10
+            off_y = eq_y + 10
             self.draw_container_slot(cr, off_x, off_y, cell_size, slots[45], 45)
             cr.set_source_rgb(0.6, 0.65, 0.75)
-            cr.set_font_size(12)
-            cr.move_to(off_x, off_y - 6)
+            cr.set_font_size(11)
+            cr.move_to(off_x, off_y - 4)
             cr.show_text("OFFHAND")
 
         # 2x2 Crafting Grid (slots 1, 2, 3, 4) & Result (slot 0)
-        craft_x = player_x + 360
-        craft_y = eq_y + 30
+        craft_x = player_x + 20 + 6 * cell_pitch
+        craft_y = eq_y + 10
         craft_indices = [[1, 2], [3, 4]]
         for r in range(2):
             for c in range(2):
                 c_idx = craft_indices[r][c]
                 if c_idx < len(slots):
-                    sx = craft_x + c * cell_pitch
-                    sy = craft_y + r * cell_pitch
-                    self.draw_container_slot(cr, sx, sy, cell_size, slots[c_idx], c_idx)
+                    sx = craft_x + c * (cell_pitch - 14)
+                    sy = craft_y + r * (cell_pitch - 14)
+                    self.draw_container_slot(cr, sx, sy, cell_size - 12, slots[c_idx], c_idx)
 
-        # Arrow pointing to result
+        # Arrow & Result (slot 0)
         cr.set_source_rgb(0.6, 0.65, 0.75)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(24)
-        cr.move_to(craft_x + 2 * cell_pitch + 20, craft_y + cell_pitch)
+        cr.set_font_size(18)
+        cr.move_to(craft_x + 2 * (cell_pitch - 14) + 8, craft_y + 36)
         cr.show_text("->")
 
-        # Crafting Result (slot 0)
         if len(slots) > 0:
-            res_x = craft_x + 2 * cell_pitch + 70
-            res_y = craft_y + 25
-            self.draw_container_slot(cr, res_x, res_y, cell_size + 8, slots[0], 0)
+            res_x = craft_x + 2 * (cell_pitch - 14) + 40
+            res_y = craft_y + 15
+            self.draw_container_slot(cr, res_x, res_y, cell_size, slots[0], 0)
 
     def draw_container_slot(self, cr, sx, sy, size, slot_data, slot_idx):
         self.container_slot_rects.append((sx, sy, size, size, slot_idx))
@@ -729,11 +962,9 @@ class ThorMcHud(Gtk.Window):
                 ext = cr.text_extents(count_str)
                 tx = sx + size - ext.width - 4
                 ty = sy + size - 4
-                # Shadow
                 cr.set_source_rgb(0.0, 0.0, 0.0)
                 cr.move_to(tx + 2, ty + 2)
                 cr.show_text(count_str)
-                # White numeral
                 cr.set_source_rgb(1.0, 1.0, 1.0)
                 cr.move_to(tx, ty)
                 cr.show_text(count_str)
@@ -753,38 +984,136 @@ class ThorMcHud(Gtk.Window):
                 cr.fill()
 
     # -------------------------------------------------------------------------
-    # ROAMING SCREEN RENDERING
+    # ROAMING SCREEN RENDERING (Proportionally filled 1240x1080)
     # -------------------------------------------------------------------------
     def draw_roaming_screen(self, cr, W, H):
-        # 1. Header with Status & Coordinates
+        # 1. Header with Status & Settings
         self.draw_header(cr, W, H)
 
-        # 2. Live Minimap Display
+        # 2. Target Inspector Banner (TOP / WAILA)
+        self.draw_target_inspector(cr, W, H)
+
+        # 3. Live 480x480 Minimap Display
         self.draw_minimap(cr, W, H)
 
-        # 3. GUI Layout Scaling & Centering
-        scale = 4.0
+        # 4. Left & Right Mod Sidebars
+        self.draw_left_sidebar_mods(cr, W, H)
+        self.draw_right_sidebar_mods(cr, W, H)
+
+        # 5. Centered Vitals, XP & Hotbar
+        scale = 4.2
         hotbar_w = 182 * scale
-        hotbar_h = 22 * scale
         center_x = (W - hotbar_w) / 2.0
 
-        # Anchor HUD stack
-        hotbar_y = 660
+        hotbar_y = 778
         xp_y = hotbar_y - (5 * scale) - 14
-        vitals_y = xp_y - (9 * scale) - 16
+        vitals_y = xp_y - (9 * scale) - 20
 
-        # Draw Vitals & Hotbar
         self.draw_vitals(cr, center_x, vitals_y, xp_y, scale)
         self.draw_hotbar(cr, center_x, hotbar_y, scale)
 
-        # Draw Quick Actions
-        self.draw_quick_actions(cr, W, H)
+        # 6. Customizable Hotkeys Bar at Bottom
+        self.draw_quick_actions(cr, W, H, in_container=False)
+
+    def draw_header(self, cr, W, H):
+        header_h = 54
+        margin_x = 36
+        header_w = W - 2 * margin_x
+
+        cr.set_source_rgba(0.12, 0.14, 0.18, 0.95)
+        cr.rectangle(margin_x, 16, header_w, header_h)
+        cr.fill()
+
+        cr.set_source_rgba(0.24, 0.28, 0.36, 1.0)
+        cr.set_line_width(2.0)
+        cr.rectangle(margin_x, 16, header_w, header_h)
+        cr.stroke()
+
+        cr.set_source_rgb(0.92, 0.94, 0.98)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(19)
+        cr.move_to(margin_x + 20, 50)
+        cr.show_text("THOR MINECRAFT COMPANION")
+
+        status_text = "CONNECTED" if self.connected else ("DEMO MODE" if self.demo_mode else "WAITING FOR GAME")
+        dot_color = (0.2, 0.9, 0.3) if self.connected else ((0.3, 0.7, 1.0) if self.demo_mode else (1.0, 0.4, 0.2))
+
+        # Status indicator
+        dot_x = margin_x + header_w - 380
+        cr.set_source_rgb(*dot_color)
+        cr.arc(dot_x, 43, 6, 0, 2 * math.pi)
+        cr.fill()
+
+        cr.set_source_rgb(0.75, 0.82, 0.9)
+        cr.set_font_size(14)
+        cr.move_to(dot_x + 16, 48)
+        cr.show_text(status_text)
+
+        # Settings [⚙ HOTKEYS] button
+        sett_btn_w = 130
+        sett_btn_h = 38
+        sett_btn_x = margin_x + header_w - sett_btn_w - 10
+        sett_btn_y = 24
+        self.action_btns.append((sett_btn_x, sett_btn_y, sett_btn_w, sett_btn_h, "⚙ HOTKEYS", "OPEN_SETTINGS"))
+        cr.set_source_rgb(0.22, 0.25, 0.32)
+        cr.rectangle(sett_btn_x, sett_btn_y, sett_btn_w, sett_btn_h)
+        cr.fill()
+        cr.set_source_rgb(0.9, 0.92, 0.96)
+        cr.set_font_size(13)
+        ext = cr.text_extents("⚙ HOTKEYS")
+        cr.move_to(sett_btn_x + (sett_btn_w - ext.width) / 2.0, sett_btn_y + 24)
+        cr.show_text("⚙ HOTKEYS")
+
+    def draw_target_inspector(self, cr, W, H):
+        tgt = self.state.target
+        if not tgt or tgt.get("type") == "NONE" or not tgt.get("name"):
+            return
+
+        tgt_w = 480
+        tgt_h = 34
+        tgt_x = (W - tgt_w) / 2.0
+        tgt_y = 80
+
+        cr.set_source_rgba(0.10, 0.12, 0.15, 0.9)
+        cr.rectangle(tgt_x, tgt_y, tgt_w, tgt_h)
+        cr.fill()
+        cr.set_source_rgba(0.25, 0.30, 0.40, 0.8)
+        cr.set_line_width(1.5)
+        cr.rectangle(tgt_x, tgt_y, tgt_w, tgt_h)
+        cr.stroke()
+
+        name = tgt.get("name", "")
+        mod = tgt.get("mod", "")
+        hp = tgt.get("health", 0.0)
+        max_hp = tgt.get("maxHealth", 0.0)
+
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(13)
+        if tgt.get("type") == "ENTITY":
+            cr.set_source_rgb(1.0, 0.35, 0.35)
+            cr.move_to(tgt_x + 12, tgt_y + 22)
+            cr.show_text(f"⚔ {name}")
+            if max_hp > 0:
+                cr.set_source_rgb(0.9, 0.9, 0.9)
+                hp_str = f"❤ {hp:.0f} / {max_hp:.0f}"
+                ext = cr.text_extents(hp_str)
+                cr.move_to(tgt_x + tgt_w - ext.width - 12, tgt_y + 22)
+                cr.show_text(hp_str)
+        else:
+            cr.set_source_rgb(0.3, 0.85, 1.0)
+            cr.move_to(tgt_x + 12, tgt_y + 22)
+            cr.show_text(f"🧱 {name}")
+            if mod:
+                cr.set_source_rgb(0.6, 0.65, 0.75)
+                ext = cr.text_extents(f"({mod})")
+                cr.move_to(tgt_x + tgt_w - ext.width - 12, tgt_y + 22)
+                cr.show_text(f"({mod})")
 
     def draw_minimap(self, cr, W, H):
         map_tile = self.map_tile
-        sheet_size = 440
+        sheet_size = 480
         sheet_x = (W - sheet_size) / 2.0
-        sheet_y = 90
+        sheet_y = 124
         border = 20
         tile_draw_size = sheet_size - 2 * border
 
@@ -794,7 +1123,7 @@ class ThorMcHud(Gtk.Window):
             draw_sprite(cr, surf, 0, 0, surf.get_width(), surf.get_height(),
                         sheet_x, sheet_y, float(sheet_size) / surf.get_width())
         else:
-            cr.set_source_rgb(0.84, 0.75, 0.59)  # Vanilla map paper beige
+            cr.set_source_rgb(0.84, 0.75, 0.59)
             cr.rectangle(sheet_x, sheet_y, sheet_size, sheet_size)
             cr.fill()
             cr.set_source_rgb(0.45, 0.38, 0.28)
@@ -819,7 +1148,6 @@ class ThorMcHud(Gtk.Window):
                     sheet_x + border, sheet_y + border, tile_scale)
 
         # Player Marker
-        # Marker center relative to tile
         origin_x = map_tile.get("originX", 0)
         origin_z = map_tile.get("originZ", 0)
         player_x = map_tile.get("playerX", 0.0)
@@ -831,29 +1159,25 @@ class ThorMcHud(Gtk.Window):
         mx = sheet_x + border + marker_px
         my = sheet_y + border + marker_pz
 
-        # Draw player orientation arrowhead
         cr.save()
         cr.translate(mx, my)
-        # Minecraft yaw: 0 = South, +90 = West, 180 = North, 270 = East. Arrow points up (-Z).
         cr.rotate(math.radians(yaw + 180.0))
 
-        r = 12.0
+        r = 13.0
         cr.move_to(0, -r)
         cr.line_to(r * 0.65, r * 0.75)
         cr.line_to(0, r * 0.35)
         cr.line_to(-r * 0.65, r * 0.75)
         cr.close_path()
 
-        # Black outline
         cr.set_source_rgb(0.0, 0.0, 0.0)
         cr.set_line_width(4.0)
         cr.stroke_preserve()
-        # White fill
         cr.set_source_rgb(1.0, 1.0, 1.0)
         cr.fill()
         cr.restore()
 
-        # Coordinates label under the map
+        # Coordinates label
         coord_str = f"X: {player_x:.1f}   Z: {player_z:.1f}"
         cr.set_source_rgb(0.9, 0.95, 1.0)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
@@ -862,38 +1186,252 @@ class ThorMcHud(Gtk.Window):
         cr.move_to(sheet_x + (sheet_size - ext.width) / 2.0, sheet_y + sheet_size + 24)
         cr.show_text(coord_str)
 
-    def draw_header(self, cr, W, H):
-        header_h = 56
-        margin_x = 40
-        header_w = W - 2 * margin_x
+    def draw_left_sidebar_mods(self, cr, W, H):
+        """Draws Equipped Armor Durability & Active Potion Effects on the left side of the minimap."""
+        box_x = 36
+        box_w = 320
+        start_y = 124
 
-        cr.set_source_rgba(0.12, 0.14, 0.18, 0.9)
-        cr.rectangle(margin_x, 20, header_w, header_h)
-        cr.fill()
+        # 1. Equipped Armor Status (Inventory HUD+ style)
+        if self.state.armor_slots:
+            cr.set_source_rgba(0.10, 0.12, 0.16, 0.85)
+            cr.rectangle(box_x, start_y, box_w, 175)
+            cr.fill()
+            cr.set_source_rgba(0.24, 0.28, 0.36, 0.8)
+            cr.set_line_width(1.5)
+            cr.rectangle(box_x, start_y, box_w, 175)
+            cr.stroke()
 
-        cr.set_source_rgba(0.24, 0.28, 0.36, 1.0)
-        cr.set_line_width(2.0)
-        cr.rectangle(margin_x, 20, header_w, header_h)
-        cr.stroke()
+            cr.set_source_rgb(0.7, 0.75, 0.85)
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(13)
+            cr.move_to(box_x + 12, start_y + 22)
+            cr.show_text("EQUIPPED ARMOR")
 
-        cr.set_source_rgb(0.92, 0.94, 0.98)
-        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-        cr.set_font_size(20)
-        cr.move_to(margin_x + 24, 54)
-        cr.show_text("THOR MINECRAFT COMPANION")
+            # 4 armor pieces (HEAD, CHEST, LEGS, FEET)
+            for i, a in enumerate(reversed(self.state.armor_slots)):
+                row_y = start_y + 36 + i * 32
+                slot_name = a.get("slot", "")
+                item_id = a.get("itemId", "minecraft:air")
+                dmg = a.get("damage", 0)
+                max_d = a.get("maxDamage", 0)
 
-        status_text = "CONNECTED" if self.connected else ("DEMO MODE" if self.demo_mode else "WAITING FOR GAME")
-        dot_color = (0.2, 0.9, 0.3) if self.connected else ((0.3, 0.7, 1.0) if self.demo_mode else (1.0, 0.4, 0.2))
+                cr.set_source_rgb(0.6, 0.65, 0.75)
+                cr.set_font_size(11)
+                cr.move_to(box_x + 12, row_y + 16)
+                cr.show_text(f"{slot_name[:4]}:")
 
-        dot_x = margin_x + header_w - 240
-        cr.set_source_rgb(*dot_color)
-        cr.arc(dot_x, 48, 7, 0, 2 * math.pi)
-        cr.fill()
+                if item_id != "minecraft:air":
+                    short_id = item_id.split(":")[-1].replace("_", " ")[:14]
+                    cr.set_source_rgb(0.9, 0.92, 0.96)
+                    cr.move_to(box_x + 60, row_y + 16)
+                    cr.show_text(short_id)
 
-        cr.set_source_rgb(0.75, 0.82, 0.9)
-        cr.set_font_size(15)
-        cr.move_to(dot_x + 20, 54)
-        cr.show_text(status_text)
+                    if max_d > 0:
+                        dur = max(0.0, min(1.0, 1.0 - (dmg / float(max_d))))
+                        bar_w = 100
+                        bar_h = 8
+                        bar_x = box_x + box_w - bar_w - 12
+                        bar_y = row_y + 7
+                        cr.set_source_rgb(0.05, 0.05, 0.05)
+                        cr.rectangle(bar_x, bar_y, bar_w, bar_h)
+                        cr.fill()
+                        cr.set_source_rgb(1.0 - dur, dur, 0.1)
+                        cr.rectangle(bar_x, bar_y, bar_w * dur, bar_h)
+                        cr.fill()
+                else:
+                    cr.set_source_rgb(0.4, 0.42, 0.48)
+                    cr.move_to(box_x + 60, row_y + 16)
+                    cr.show_text("EMPTY")
+
+        # 2. Active Potion Effects (below armor status)
+        eff_y = start_y + 195
+        if self.state.effects:
+            eff_h = min(280, 30 + len(self.state.effects) * 30)
+            cr.set_source_rgba(0.10, 0.12, 0.16, 0.85)
+            cr.rectangle(box_x, eff_y, box_w, eff_h)
+            cr.fill()
+            cr.set_source_rgba(0.24, 0.28, 0.36, 0.8)
+            cr.set_line_width(1.5)
+            cr.rectangle(box_x, eff_y, box_w, eff_h)
+            cr.stroke()
+
+            cr.set_source_rgb(0.7, 0.75, 0.85)
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(13)
+            cr.move_to(box_x + 12, eff_y + 22)
+            cr.show_text("ACTIVE EFFECTS")
+
+            for i, eff in enumerate(self.state.effects[:8]):
+                row_y = eff_y + 36 + i * 28
+                name = eff.get("name", "")
+                dur_ticks = eff.get("durationTicks", 0)
+                amp = eff.get("amplifier", 0)
+                sec = dur_ticks // 20
+                time_str = f"{sec // 60:02d}:{sec % 60:02d}"
+                amp_str = f" {amp + 1}" if amp > 0 else ""
+
+                cr.set_source_rgb(0.2, 0.8, 0.9) if eff.get("beneficial", True) else cr.set_source_rgb(0.9, 0.3, 0.3)
+                cr.set_font_size(12)
+                cr.move_to(box_x + 12, row_y + 14)
+                cr.show_text(f"{name}{amp_str}")
+
+                cr.set_source_rgb(0.7, 0.75, 0.85)
+                ext = cr.text_extents(time_str)
+                cr.move_to(box_x + box_w - ext.width - 12, row_y + 14)
+                cr.show_text(time_str)
+
+    def draw_right_sidebar_mods(self, cr, W, H):
+        """Draws TACZ Gun Tactical HUD & LSO Survival / ParCool Stamina on the right side of the minimap."""
+        box_w = 320
+        box_x = W - box_w - 36
+        start_y = 124
+
+        # 1. TACZ Gun Tactical HUD
+        if self.state.gun and self.state.gun.get("active"):
+            g = self.state.gun
+            g_h = 160
+            cr.set_source_rgba(0.12, 0.14, 0.18, 0.95)
+            cr.rectangle(box_x, start_y, box_w, g_h)
+            cr.fill()
+            cr.set_source_rgba(0.85, 0.65, 0.15, 0.9)
+            cr.set_line_width(2.0)
+            cr.rectangle(box_x, start_y, box_w, g_h)
+            cr.stroke()
+
+            # Gun Name
+            cr.set_source_rgb(1.0, 0.85, 0.2)
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(15)
+            cr.move_to(box_x + 14, start_y + 26)
+            cr.show_text(f"🔫 {g.get('gunName', 'FIREARM').upper()}")
+
+            # Fire Mode
+            f_mode = g.get("fireMode", "SEMI")
+            cr.set_source_rgb(0.3, 0.8, 1.0)
+            cr.set_font_size(12)
+            ext = cr.text_extents(f_mode)
+            cr.move_to(box_x + box_w - ext.width - 14, start_y + 26)
+            cr.show_text(f_mode)
+
+            # Ammo Count (Big Numeral)
+            ammo = g.get("ammo", 0)
+            max_ammo = g.get("maxAmmo", max(1, ammo))
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.set_font_size(28)
+            cr.move_to(box_x + 14, start_y + 70)
+            cr.show_text(f"{ammo} / {max_ammo}")
+
+            # Reserve Ammo
+            res = g.get("reserveAmmo", 0)
+            cr.set_source_rgb(0.65, 0.72, 0.85)
+            cr.set_font_size(13)
+            cr.move_to(box_x + 14, start_y + 96)
+            cr.show_text(f"RESERVE: {res} ROUNDS")
+
+            # Ammo Fill Gauge
+            bar_w = box_w - 28
+            bar_h = 14
+            bar_x = box_x + 14
+            bar_y = start_y + 118
+            cr.set_source_rgb(0.06, 0.08, 0.10)
+            cr.rectangle(bar_x, bar_y, bar_w, bar_h)
+            cr.fill()
+            fill_pct = max(0.0, min(1.0, ammo / float(max_ammo))) if max_ammo > 0 else 0
+            if fill_pct > 0.3:
+                cr.set_source_rgb(0.2, 0.85, 0.3)
+            elif fill_pct > 0.15:
+                cr.set_source_rgb(0.9, 0.7, 0.1)
+            else:
+                cr.set_source_rgb(0.9, 0.2, 0.1)
+            cr.rectangle(bar_x, bar_y, bar_w * fill_pct, bar_h)
+            cr.fill()
+
+            start_y += g_h + 16
+
+        # 2. LSO Survival & ParCool Stamina Box
+        surv = self.state.survival
+        if surv and (surv.get("hasThirst") or surv.get("hasTemp") or surv.get("hasStamina")):
+            s_h = 175
+            cr.set_source_rgba(0.10, 0.12, 0.16, 0.85)
+            cr.rectangle(box_x, start_y, box_w, s_h)
+            cr.fill()
+            cr.set_source_rgba(0.24, 0.28, 0.36, 0.8)
+            cr.set_line_width(1.5)
+            cr.rectangle(box_x, start_y, box_w, s_h)
+            cr.stroke()
+
+            cr.set_source_rgb(0.7, 0.75, 0.85)
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(13)
+            cr.move_to(box_x + 14, start_y + 22)
+            cr.show_text("SURVIVAL VITALS")
+
+            row_y = start_y + 36
+
+            # Hydration / Thirst
+            if surv.get("hasThirst"):
+                th = surv.get("thirst", 20.0)
+                cr.set_source_rgb(0.2, 0.65, 1.0)
+                cr.set_font_size(12)
+                cr.move_to(box_x + 14, row_y + 14)
+                cr.show_text(f"💧 THIRST: {th:.1f} / 20.0")
+
+                bar_w = 120
+                bar_h = 8
+                bar_x = box_x + box_w - bar_w - 14
+                bar_y = row_y + 4
+                cr.set_source_rgb(0.06, 0.08, 0.10)
+                cr.rectangle(bar_x, bar_y, bar_w, bar_h)
+                cr.fill()
+                cr.set_source_rgb(0.2, 0.65, 1.0)
+                cr.rectangle(bar_x, bar_y, bar_w * (th / 20.0), bar_h)
+                cr.fill()
+                row_y += 34
+
+            # Temperature Gauge
+            if surv.get("hasTemp"):
+                t_val = surv.get("temperature", 0.0)
+                t_status = surv.get("tempStatus", "NORMAL")
+                cr.set_source_rgb(1.0, 0.5, 0.2) if "HOT" in t_status else cr.set_source_rgb(0.4, 0.8, 1.0)
+                cr.set_font_size(12)
+                cr.move_to(box_x + 14, row_y + 14)
+                cr.show_text(f"🌡 TEMP: {t_status}")
+
+                badge_w = 90
+                badge_h = 20
+                badge_x = box_x + box_w - badge_w - 14
+                badge_y = row_y - 2
+                cr.set_source_rgb(0.18, 0.20, 0.26)
+                cr.rectangle(badge_x, badge_y, badge_w, badge_h)
+                cr.fill()
+                cr.set_source_rgb(0.9, 0.95, 1.0)
+                cr.set_font_size(11)
+                ext = cr.text_extents(f"{t_val:.1f}°")
+                cr.move_to(badge_x + (badge_w - ext.width) / 2.0, badge_y + 14)
+                cr.show_text(f"{t_val:.1f}°")
+                row_y += 34
+
+            # ParCool Stamina
+            if surv.get("hasStamina"):
+                st = surv.get("stamina", 0)
+                max_st = surv.get("maxStamina", max(1, st))
+                cr.set_source_rgb(0.3, 0.9, 0.4)
+                cr.set_font_size(12)
+                cr.move_to(box_x + 14, row_y + 14)
+                cr.show_text(f"⚡ STAMINA: {st}")
+
+                bar_w = 120
+                bar_h = 8
+                bar_x = box_x + box_w - bar_w - 14
+                bar_y = row_y + 4
+                cr.set_source_rgb(0.06, 0.08, 0.10)
+                cr.rectangle(bar_x, bar_y, bar_w, bar_h)
+                cr.fill()
+                cr.set_source_rgb(0.3, 0.9, 0.4)
+                pct = max(0.0, min(1.0, st / float(max_st))) if max_st > 0 else 0
+                cr.rectangle(bar_x, bar_y, bar_w * pct, bar_h)
+                cr.fill()
 
     def draw_vitals(self, cr, hotbar_x, vitals_y, xp_y, scale):
         icons = self.icons_surface
@@ -974,7 +1512,7 @@ class ThorMcHud(Gtk.Window):
                     abs_sx = 160 if val >= 2 else 169
                     draw_sprite(cr, icons, abs_sx, 0, 9, 9, hx, hy, scale)
 
-        # Armor Row
+        # Armor & Toughness Row
         armor_pts = self.state.armor
         if armor_pts > 0:
             armor_y = vitals_y - (10 * scale) if self.state.absorption <= 0 else vitals_y - (20 * scale)
@@ -989,7 +1527,7 @@ class ThorMcHud(Gtk.Window):
                     elif armor_pts > 0:
                         draw_sprite(cr, icons, 16, 9, 9, 9, ax, armor_y, scale)
 
-        # --- Hunger / Food Row ---
+        # --- Hunger / Food Row (with AppleSkin saturation outline) ---
         food_right = hotbar_x + hotbar_w
         food_pts = self.state.food
 
@@ -1004,6 +1542,12 @@ class ThorMcHud(Gtk.Window):
                     draw_sprite(cr, icons, 52, 27, 9, 9, fx, fy, scale)
                 elif val == 1:
                     draw_sprite(cr, icons, 61, 27, 9, 9, fx, fy, scale)
+
+                # AppleSkin saturation glow
+                if self.state.saturation > (i * 2):
+                    cr.set_source_rgba(1.0, 0.8, 0.2, 0.4)
+                    cr.rectangle(fx - 1, fy - 1, 9 * scale + 2, 9 * scale + 2)
+                    cr.stroke()
             else:
                 cr.set_source_rgb(0.25, 0.15, 0.05)
                 cr.arc(fx + 4 * scale, fy + 4 * scale, 4 * scale, 0, 2 * math.pi)
@@ -1110,22 +1654,24 @@ class ThorMcHud(Gtk.Window):
                     cr.rectangle(bar_x, bar_y, bar_w * dur, bar_h)
                     cr.fill()
 
-    def draw_quick_actions(self, cr, W, H):
-        btn_w = 160
-        btn_h = 58
+    def draw_quick_actions(self, cr, W, H, in_container=False):
+        btn_w = 175
+        btn_h = 74
         btn_gap = 20
-        btns = [
-            ("INV [E]", "E"),
-            ("DROP [Q]", "Q"),
-            ("SWAP [F]", "F"),
-            ("CHAT [T]", "T"),
-            ("MAP [M]", "M"),
-            ("PAUSE", "ESCAPE")
-        ]
+
+        # Build list of 6 hotkeys from user configuration
+        btns = []
+        for item in self.hotkeys:
+            label = item.get("label", "ACTION")
+            cmd = item.get("cmd", "")
+            # Adapt label in container mode if it's the inventory hotkey
+            if in_container and cmd == "E":
+                label = "CLOSE [E]"
+            btns.append((label, cmd))
 
         total_w = len(btns) * btn_w + (len(btns) - 1) * btn_gap
         btn_x0 = (W - total_w) / 2.0
-        btn_y0 = H - 95
+        btn_y0 = H - 150
 
         self.action_btns = []
         for i, (label, cmd) in enumerate(btns):
@@ -1133,17 +1679,23 @@ class ThorMcHud(Gtk.Window):
             by = btn_y0
             self.action_btns.append((bx, by, btn_w, btn_h, label, cmd))
 
-            cr.set_source_rgb(0.2, 0.22, 0.28)
+            # Button Background
+            if in_container and cmd in ("E", "ESCAPE", "CLOSE"):
+                cr.set_source_rgb(0.45, 0.18, 0.18)
+            else:
+                cr.set_source_rgb(0.20, 0.22, 0.28)
             cr.rectangle(bx, by, btn_w, btn_h)
             cr.fill()
 
-            cr.set_source_rgb(0.35, 0.38, 0.46)
+            # Highlights
+            cr.set_source_rgb(0.38, 0.42, 0.52)
             cr.rectangle(bx, by, btn_w, 3)
             cr.fill()
             cr.rectangle(bx, by, 3, btn_h)
             cr.fill()
 
-            cr.set_source_rgb(0.1, 0.11, 0.14)
+            # Shadows
+            cr.set_source_rgb(0.10, 0.11, 0.14)
             cr.rectangle(bx, by + btn_h - 3, btn_w, 3)
             cr.fill()
             cr.rectangle(bx + btn_w - 3, by, 3, btn_h)
@@ -1151,18 +1703,197 @@ class ThorMcHud(Gtk.Window):
 
             cr.set_source_rgb(0.92, 0.94, 0.98)
             cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-            cr.set_font_size(16)
+            cr.set_font_size(17)
             ext = cr.text_extents(label)
             cr.move_to(bx + (btn_w - ext.width) / 2.0, by + (btn_h + ext.height) / 2.0 - 2)
             cr.show_text(label)
 
+    # -------------------------------------------------------------------------
+    # HOTKEY CONFIGURATION MODAL DIALOG
+    # -------------------------------------------------------------------------
+    def draw_settings_modal(self, cr, W, H):
+        self.settings_action_btns = []
+
+        # Semi-transparent backdrop
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.78)
+        cr.paint()
+
+        # Modal Box (centered)
+        box_w = 980
+        box_h = 720
+        box_x = (W - box_w) / 2.0
+        box_y = (H - box_h) / 2.0
+
+        cr.set_source_rgba(0.12, 0.14, 0.18, 0.98)
+        cr.rectangle(box_x, box_y, box_w, box_h)
+        cr.fill()
+
+        cr.set_source_rgba(0.30, 0.36, 0.48, 1.0)
+        cr.set_line_width(2.5)
+        cr.rectangle(box_x, box_y, box_w, box_h)
+        cr.stroke()
+
+        # Modal Header
+        cr.set_source_rgb(1.0, 0.85, 0.2)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(22)
+        cr.move_to(box_x + 30, box_y + 45)
+        cr.show_text("CONFIGURE HOTKEYS")
+
+        # Done [✕ DONE] Button
+        done_w = 110
+        done_h = 42
+        done_x = box_x + box_w - done_w - 24
+        done_y = box_y + 20
+        self.settings_action_btns.append((done_x, done_y, done_w, done_h, "CLOSE_SETTINGS", None))
+        cr.set_source_rgb(0.25, 0.65, 0.35)
+        cr.rectangle(done_x, done_y, done_w, done_h)
+        cr.fill()
+        cr.set_source_rgb(1.0, 1.0, 1.0)
+        cr.set_font_size(15)
+        ext = cr.text_extents("✕ DONE")
+        cr.move_to(done_x + (done_w - ext.width) / 2.0, done_y + 26)
+        cr.show_text("✕ DONE")
+
+        # 6 Hotkey Slot Selection Buttons
+        slot_w = 140
+        slot_h = 80
+        slot_gap = 16
+        slots_x0 = box_x + (box_w - (6 * slot_w + 5 * slot_gap)) / 2.0
+        slots_y0 = box_y + 85
+
+        for i in range(6):
+            sx = slots_x0 + i * (slot_w + slot_gap)
+            sy = slots_y0
+            self.settings_action_btns.append((sx, sy, slot_w, slot_h, "SELECT_SLOT", i))
+
+            is_selected = (self.selected_hotkey_slot == i)
+            if is_selected:
+                cr.set_source_rgb(0.24, 0.38, 0.58)
+            else:
+                cr.set_source_rgb(0.18, 0.20, 0.25)
+            cr.rectangle(sx, sy, slot_w, slot_h)
+            cr.fill()
+
+            if is_selected:
+                cr.set_source_rgb(0.4, 0.85, 1.0)
+                cr.set_line_width(3.0)
+                cr.rectangle(sx, sy, slot_w, slot_h)
+                cr.stroke()
+
+            # Slot title
+            cr.set_source_rgb(0.7, 0.75, 0.85)
+            cr.set_font_size(12)
+            cr.move_to(sx + 10, sy + 22)
+            cr.show_text(f"SLOT {i + 1}")
+
+            # Current assigned label
+            cur_label = self.hotkeys[i].get("label", "NONE") if i < len(self.hotkeys) else "NONE"
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.set_font_size(14)
+            ext = cr.text_extents(cur_label)
+            cr.move_to(sx + (slot_w - ext.width) / 2.0, sy + 54)
+            cr.show_text(cur_label)
+
+        # Action Preset Picker
+        cr.set_source_rgb(0.9, 0.92, 0.96)
+        cr.set_font_size(16)
+        cr.move_to(box_x + 30, box_y + 205)
+        cr.show_text(f"SELECT ACTION FOR SLOT {self.selected_hotkey_slot + 1}:")
+
+        cols = 4
+        preset_w = 210
+        preset_h = 52
+        preset_gap_x = 24
+        preset_gap_y = 16
+        preset_x0 = box_x + (box_w - (cols * preset_w + (cols - 1) * preset_gap_x)) / 2.0
+        preset_y0 = box_y + 230
+
+        for idx, (p_lbl, p_cmd) in enumerate(HOTKEY_PRESETS):
+            col = idx % cols
+            row = idx // cols
+            px = preset_x0 + col * (preset_w + preset_gap_x)
+            py = preset_y0 + row * (preset_h + preset_gap_y)
+            self.settings_action_btns.append((px, py, preset_w, preset_h, "ASSIGN_PRESET", (p_lbl, p_cmd)))
+
+            cur_assigned = (self.hotkeys[self.selected_hotkey_slot].get("cmd") == p_cmd)
+            if cur_assigned:
+                cr.set_source_rgb(0.2, 0.55, 0.3)
+            else:
+                cr.set_source_rgb(0.20, 0.22, 0.28)
+            cr.rectangle(px, py, preset_w, preset_h)
+            cr.fill()
+
+            cr.set_source_rgb(0.35, 0.38, 0.48)
+            cr.rectangle(px, py, preset_w, 2)
+            cr.fill()
+
+            cr.set_source_rgb(0.95, 0.95, 1.0)
+            cr.set_font_size(14)
+            ext = cr.text_extents(p_lbl)
+            cr.move_to(px + (preset_w - ext.width) / 2.0, py + 32)
+            cr.show_text(p_lbl)
+
+        # Reset Defaults Button
+        rst_w = 170
+        rst_h = 42
+        rst_x = box_x + 30
+        rst_y = box_y + box_h - rst_h - 24
+        self.settings_action_btns.append((rst_x, rst_y, rst_w, rst_h, "RESET_SETTINGS", None))
+        cr.set_source_rgb(0.32, 0.22, 0.22)
+        cr.rectangle(rst_x, rst_y, rst_w, rst_h)
+        cr.fill()
+        cr.set_source_rgb(0.9, 0.7, 0.7)
+        cr.set_font_size(13)
+        ext = cr.text_extents("RESET DEFAULTS")
+        cr.move_to(rst_x + (rst_w - ext.width) / 2.0, rst_y + 26)
+        cr.show_text("RESET DEFAULTS")
+
     def init_demo_state(self):
         self.state.health = 18.0
         self.state.armor = 14
+        self.state.armor_toughness = 6.0
         self.state.food = 19
+        self.state.saturation = 8.5
         self.state.xp_level = 42
         self.state.xp_progress = 0.68
         self.state.selected_slot = 1
+        self.state.gun = {
+            "active": True,
+            "gunName": "AK-47 Tactical",
+            "ammo": 30,
+            "maxAmmo": 30,
+            "fireMode": "AUTO",
+            "reserveAmmo": 180
+        }
+        self.state.survival = {
+            "hasThirst": True,
+            "thirst": 17.5,
+            "thirstSaturation": 4.0,
+            "hasTemp": True,
+            "temperature": 37.0,
+            "tempStatus": "NORMAL",
+            "hasStamina": True,
+            "stamina": 850,
+            "maxStamina": 1000
+        }
+        self.state.target = {
+            "type": "ENTITY",
+            "name": "Infected Walker",
+            "mod": "theundead",
+            "health": 18.0,
+            "maxHealth": 20.0
+        }
+        self.state.effects = [
+            {"id": "speed", "name": "Speed", "durationTicks": 1800, "amplifier": 1, "beneficial": True},
+            {"id": "regeneration", "name": "Regeneration", "durationTicks": 400, "amplifier": 0, "beneficial": True}
+        ]
+        self.state.armor_slots = [
+            {"slot": "FEET", "itemId": "minecraft:diamond_boots", "count": 1, "damage": 50, "maxDamage": 429},
+            {"slot": "LEGS", "itemId": "minecraft:diamond_leggings", "count": 1, "damage": 80, "maxDamage": 495},
+            {"slot": "CHEST", "itemId": "minecraft:diamond_chestplate", "count": 1, "damage": 120, "maxDamage": 528},
+            {"slot": "HEAD", "itemId": "minecraft:diamond_helmet", "count": 1, "damage": 30, "maxDamage": 363}
+        ]
         self.state.hotbar = [
             HotbarSlot("minecraft:netherite_sword", count=1, damage=240, max_damage=2031, has_glint=True),
             HotbarSlot("minecraft:bow", count=1, damage=85, max_damage=384, has_glint=True),
