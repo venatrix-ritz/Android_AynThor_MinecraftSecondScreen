@@ -3,14 +3,23 @@
 Thor Minecraft HUD - Native Linux Second-Screen Companion for AYN Thor
 ----------------------------------------------------------------------
 Connects to the AYN Thor Minecraft Second Screen Fabric/Forge mod over local loopback
-TCP (127.0.0.1:48291) and renders the actual Minecraft GUI (hotbar, hearts, food,
-armor, XP bar, air bubbles, items) natively on the Thor's bottom display via Gamescope.
+TCP (127.0.0.1:48291) and renders the actual Minecraft GUI on the Thor's bottom display (1240x1080).
 
-Features:
-- Actual Minecraft sprites extracted directly from client jar (icons.png, widgets.png)
-- Pixel-perfect nearest-neighbor scaling (matching vanilla GUI scale 4)
-- Dynamically centered for Thor's secondary display (1240x1080)
-- Touch-responsive hotbar slot selection & quick action keys
+Modes:
+1. Roaming Mode:
+   - Live 128x128 Minimap with paper parchment background, player position marker and yaw rotation
+   - Player coordinates and compass orientation
+   - Vitals: Vanilla health hearts (normal, absorption, poison, wither), armor, hunger, air bubbles, XP bar
+   - Hotbar with authentic vanilla textures, items, counts, durability bars, offhand slot
+   - Quick action buttons (INV, DROP, SWAP, CHAT, ESC)
+
+2. Container / Inventory Mode:
+   - Automatically activates when player opens inventory, chest, furnace, crafting table, or mod container
+   - Top screen suppresses container rendering for clean 3D gameplay view
+   - Bottom screen renders full interactive container slot grid + player inventory + hotbar
+   - Touch slot interaction: Normal pickup/place and Shift-click quick move toggle
+   - Carried cursor item badge and drop-to-world control
+   - Close button to return to Roaming mode
 """
 
 import os
@@ -119,14 +128,22 @@ class ThorMcHud(Gtk.Window):
         self.lock = threading.Lock()
         self.send_queue = []
 
+        # Container & Minimap State
+        self.current_container = None
+        self.map_tile = None
+        self.shift_click_mode = False
+
+        # Hit-testing rects
+        self.slot_rects = []
+        self.action_btns = []
+        self.container_slot_rects = []
+        self.container_action_btns = []
+
         # Texture surfaces
         self.icons_surface = None
         self.widgets_surface = None
+        self.map_bg_surface = None
         self.load_minecraft_textures()
-
-        # Dynamic layout rects for hit-testing
-        self.slot_rects = []
-        self.action_btns = []
 
         # GTK Drawing Area
         self.darea = Gtk.DrawingArea()
@@ -155,94 +172,137 @@ class ThorMcHud(Gtk.Window):
         GLib.timeout_add(50, self.tick_redraw)
 
     def load_minecraft_textures(self):
-        """Locates the Minecraft client jar and extracts icons.png and widgets.png."""
+        """Locates the Minecraft client jar and extracts icons.png, widgets.png, map_background.png."""
         jar_path = None
         for pattern in CLIENT_JAR_SEARCH_PATHS:
             matches = glob.glob(pattern)
             if matches:
-                jar_path = matches[0]
+                jar_path = sorted(matches)[-1]
                 break
 
         if not jar_path or not os.path.isfile(jar_path):
-            print(f"[ThorMcHud] Notice: Client jar not found, fallback to vector primitives.")
+            print(f"[ThorHud] Client jar not found. Using procedural fallback textures.")
             return
 
         try:
-            print(f"[ThorMcHud] Loading vanilla textures from: {jar_path}")
-            with zipfile.ZipFile(jar_path, "r") as z:
-                if "assets/minecraft/textures/gui/icons.png" in z.namelist():
-                    icons_bytes = z.read("assets/minecraft/textures/gui/icons.png")
-                    self.icons_surface = cairo.ImageSurface.create_from_png(io.BytesIO(icons_bytes))
-                    print(f"[ThorMcHud] Loaded icons.png ({self.icons_surface.get_width()}x{self.icons_surface.get_height()})")
+            with zipfile.ZipFile(jar_path, 'r') as z:
+                for name in z.namelist():
+                    if name.endswith("textures/gui/icons.png"):
+                        data = z.read(name)
+                        self.icons_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
+                    elif name.endswith("textures/gui/widgets.png"):
+                        data = z.read(name)
+                        self.widgets_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
+                    elif name.endswith("textures/map/map_background.png"):
+                        data = z.read(name)
+                        self.map_bg_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
 
-                if "assets/minecraft/textures/gui/widgets.png" in z.namelist():
-                    widgets_bytes = z.read("assets/minecraft/textures/gui/widgets.png")
-                    self.widgets_surface = cairo.ImageSurface.create_from_png(io.BytesIO(widgets_bytes))
-                    print(f"[ThorMcHud] Loaded widgets.png ({self.widgets_surface.get_width()}x{self.widgets_surface.get_height()})")
+            print(f"[ThorHud] Loaded textures from: {jar_path}")
         except Exception as e:
-            print(f"[ThorMcHud] Failed to load textures from jar: {e}")
+            print(f"[ThorHud] Error loading textures from jar: {e}")
 
     def tick_redraw(self):
         self.darea.queue_draw()
-        return True
+        return self.running
 
-    def send_command(self, cmd_text):
-        if self.demo_mode:
-            print(f"[DEMO] Simulated command sent: {cmd_text}")
-            return
+    def send_command(self, cmd):
         with self.lock:
-            self.send_queue.append(cmd_text)
+            self.send_queue.append(cmd)
 
     def network_loop(self):
         while self.running:
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(3.0)
+                s.settimeout(2.0)
                 s.connect((self.host, self.port))
-                s.settimeout(None)
+                s.setblocking(False)
                 self.sock = s
                 self.connected = True
-                print(f"[ThorMcHud] Connected to Minecraft at {self.host}:{self.port}")
+                print(f"[ThorHud] Connected to {self.host}:{self.port}")
 
-                s.sendall(b"ASSETS\n")
-                s.sendall(b"BINDINGS\n")
-
-                reader = s.makefile("r", encoding="utf-8")
+                recv_buf = ""
                 while self.running:
+                    # Flush outgoing queue
                     with self.lock:
-                        while self.send_queue:
-                            cmd = self.send_queue.pop(0)
-                            if not cmd.endswith("\n"):
-                                cmd += "\n"
-                            s.sendall(cmd.encode("utf-8"))
+                        if self.send_queue:
+                            out = "\n".join(self.send_queue) + "\n"
+                            self.send_queue.clear()
+                            s.sendall(out.encode("utf-8"))
 
+                    # Read incoming data
                     r, _, _ = select.select([s], [], [], 0.05)
                     if r:
-                        line = reader.readline()
-                        if not line:
+                        chunk = s.recv(16384)
+                        if not chunk:
                             break
-                        self.handle_message(line.strip())
-            except Exception:
-                self.connected = False
-                self.sock = None
-                time.sleep(RECONNECT_INTERVAL)
-            finally:
-                if self.sock:
-                    try:
-                        self.sock.close()
-                    except Exception:
-                        pass
-                self.connected = False
+                        recv_buf += chunk.decode("utf-8", errors="replace")
+                        while "\n" in recv_buf:
+                            line, recv_buf = recv_buf.split("\n", 1)
+                            line = line.strip()
+                            if line:
+                                self.parse_incoming_line(line)
 
-    def handle_message(self, line):
-        if not line:
-            return
+            except Exception as e:
+                with self.lock:
+                    self.connected = False
+                    self.sock = None
+                time.sleep(RECONNECT_INTERVAL)
+
+    def parse_incoming_line(self, line):
         try:
             msg = json.loads(line)
         except Exception:
             return
 
         msg_type = msg.get("type")
+
+        # 1. Minimap tile update
+        if msg_type == "map":
+            data_b64 = msg.get("data")
+            if data_b64:
+                try:
+                    png_bytes = base64.b64decode(data_b64)
+                    surface = cairo.ImageSurface.create_from_png(io.BytesIO(png_bytes))
+                    with self.lock:
+                        self.map_tile = {
+                            "surface": surface,
+                            "originX": msg.get("originX", 0),
+                            "originZ": msg.get("originZ", 0),
+                            "playerX": msg.get("playerX", 0.0),
+                            "playerZ": msg.get("playerZ", 0.0),
+                            "yaw": msg.get("yaw", 0.0),
+                            "size": msg.get("size", 128)
+                        }
+                except Exception as ex:
+                    print(f"Error decoding map tile: {ex}")
+            return
+
+        # 2. Container menu update
+        if msg_type == "container":
+            with self.lock:
+                self.current_container = msg
+                # Prefetch item icons
+                for s in msg.get("slots", []):
+                    st = s.get("stack", {})
+                    iid = st.get("itemId", "minecraft:air")
+                    if iid != "minecraft:air" and iid not in self.icon_cache and iid not in self.requested_icons:
+                        self.requested_icons.add(iid)
+                        self.send_queue.append(f"ICON:{iid}")
+                cur = msg.get("cursor", {})
+                cur_id = cur.get("itemId", "minecraft:air")
+                if cur_id != "minecraft:air" and cur_id not in self.icon_cache and cur_id not in self.requested_icons:
+                    self.requested_icons.add(cur_id)
+                    self.send_queue.append(f"ICON:{cur_id}")
+            return
+
+        # 3. Player left world
+        if msg_type == "noplayer":
+            with self.lock:
+                self.current_container = None
+                self.map_tile = None
+            return
+
+        # 4. Item icon response
         if msg_type == "icon":
             item_id = msg.get("itemId")
             data_b64 = msg.get("data")
@@ -256,6 +316,7 @@ class ThorMcHud(Gtk.Window):
                     print(f"Error decoding icon for {item_id}: {ex}")
             return
 
+        # 5. Standard HudState snapshot
         with self.lock:
             if "health" in msg:
                 self.state.health = float(msg.get("health", 20.0))
@@ -311,15 +372,44 @@ class ThorMcHud(Gtk.Window):
 
     def on_touch_event(self, widget, event):
         if event.type == Gdk.EventType.TOUCH_BEGIN:
-            self.handle_pointer_interaction(event.x, event.y)
+            self.handle_pointer_interaction(event.x, event.y, button=1)
         return True
 
     def on_button_press(self, widget, event):
-        if event.button == 1:
-            self.handle_pointer_interaction(event.x, event.y)
+        self.handle_pointer_interaction(event.x, event.y, button=event.button)
         return True
 
-    def handle_pointer_interaction(self, x, y):
+    def handle_pointer_interaction(self, x, y, button=1):
+        # Container Mode Interactions
+        is_container_open = False
+        with self.lock:
+            if self.current_container and self.current_container.get("isScreenOpen"):
+                is_container_open = True
+
+        if is_container_open:
+            # Check container action buttons
+            for bx, by, bw, bh, cmd in self.container_action_btns:
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    if cmd == "TOGGLE_SHIFT":
+                        self.shift_click_mode = not self.shift_click_mode
+                    elif cmd == "CLOSE":
+                        self.send_command("CLOSE_CONTAINER")
+                    elif cmd == "DROP_HELD":
+                        sync_id = self.current_container.get("syncId", 0)
+                        self.send_command(f"SLOT:{sync_id},-999,0,PICKUP")
+                    return
+
+            # Check container slot clicks
+            for rx, ry, rw, rh, slot_idx in self.container_slot_rects:
+                if rx <= x <= rx + rw and ry <= y <= ry + rh:
+                    sync_id = self.current_container.get("syncId", 0)
+                    action = "QUICK_MOVE" if self.shift_click_mode else "PICKUP"
+                    btn_val = 0 if button == 1 else 1
+                    self.send_command(f"SLOT:{sync_id},{slot_idx},{btn_val},{action}")
+                    return
+            return
+
+        # Roaming Mode Interactions
         for rx, ry, rw, rh, idx in self.slot_rects:
             if rx <= x <= rx + rw and ry <= y <= ry + rh:
                 self.state.selected_slot = idx
@@ -337,38 +427,440 @@ class ThorMcHud(Gtk.Window):
         if W <= 1 or H <= 1:
             W, H = DEFAULT_WIDTH, DEFAULT_HEIGHT
 
-        # 1. Background: Dark Minecraft UI theme
+        # Dark Minecraft UI canvas
         cr.set_source_rgb(0.08, 0.09, 0.11)
         cr.paint()
 
-        # Subtle vignette / frame
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.4)
-        cr.rectangle(0, 0, W, H)
+        is_container_open = False
+        with self.lock:
+            if self.current_container and self.current_container.get("isScreenOpen"):
+                is_container_open = True
+
+        if is_container_open:
+            self.draw_container_screen(cr, W, H)
+        else:
+            self.draw_roaming_screen(cr, W, H)
+
+    # -------------------------------------------------------------------------
+    # CONTAINER SCREEN RENDERING
+    # -------------------------------------------------------------------------
+    def draw_container_screen(self, cr, W, H):
+        self.container_slot_rects = []
+        self.container_action_btns = []
+
+        container = self.current_container or {}
+        sync_id = container.get("syncId", 0)
+        title = container.get("title") or "INVENTORY"
+        slots = container.get("slots", [])
+        cursor = container.get("cursor", {})
+        cursor_item = cursor.get("itemId", "minecraft:air")
+        cursor_count = cursor.get("count", 0)
+
+        # 1. Top Header & Control Bar
+        header_y = 20
+        header_h = 58
+        margin_x = 40
+        header_w = W - 2 * margin_x
+
+        cr.set_source_rgba(0.12, 0.14, 0.18, 0.95)
+        cr.rectangle(margin_x, header_y, header_w, header_h)
+        cr.fill()
+        cr.set_source_rgba(0.28, 0.32, 0.42, 1.0)
+        cr.set_line_width(2.0)
+        cr.rectangle(margin_x, header_y, header_w, header_h)
         cr.stroke()
 
-        # 2. Header
+        # Title
+        cr.set_source_rgb(1.0, 0.85, 0.2)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(20)
+        cr.move_to(margin_x + 24, header_y + 36)
+        cr.show_text(title.upper())
+
+        # Touch Mode Button (Normal vs Shift Quick-Move)
+        mode_btn_w = 200
+        mode_btn_h = 42
+        mode_btn_x = margin_x + 300
+        mode_btn_y = header_y + 8
+        self.container_action_btns.append((mode_btn_x, mode_btn_y, mode_btn_w, mode_btn_h, "TOGGLE_SHIFT"))
+
+        if self.shift_click_mode:
+            cr.set_source_rgb(0.2, 0.6, 0.3)
+        else:
+            cr.set_source_rgb(0.22, 0.24, 0.30)
+        cr.rectangle(mode_btn_x, mode_btn_y, mode_btn_w, mode_btn_h)
+        cr.fill()
+        cr.set_source_rgb(0.9, 0.95, 1.0)
+        cr.set_font_size(14)
+        mode_lbl = "MODE: QUICK-MOVE [ON]" if self.shift_click_mode else "MODE: NORMAL TAP"
+        ext = cr.text_extents(mode_lbl)
+        cr.move_to(mode_btn_x + (mode_btn_w - ext.width) / 2.0, mode_btn_y + 26)
+        cr.show_text(mode_lbl)
+
+        # Carried Cursor Item Badge
+        if cursor_item != "minecraft:air":
+            held_w = 260
+            held_x = mode_btn_x + mode_btn_w + 20
+            held_y = mode_btn_y
+            cr.set_source_rgba(0.2, 0.15, 0.05, 0.9)
+            cr.rectangle(held_x, held_y, held_w, mode_btn_h)
+            cr.fill()
+            cr.set_source_rgb(1.0, 0.7, 0.1)
+            cr.rectangle(held_x, held_y, held_w, mode_btn_h)
+            cr.stroke()
+
+            # Item icon & text
+            cur_short = cursor_item.split(":")[-1].replace("_", " ")[:12]
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.set_font_size(14)
+            cr.move_to(held_x + 12, held_y + 26)
+            cr.show_text(f"Holding: {cur_short} x{cursor_count}")
+
+            # Drop button
+            drop_btn_w = 90
+            drop_btn_x = held_x + held_w + 12
+            self.container_action_btns.append((drop_btn_x, held_y, drop_btn_w, mode_btn_h, "DROP_HELD"))
+            cr.set_source_rgb(0.5, 0.15, 0.15)
+            cr.rectangle(drop_btn_x, held_y, drop_btn_w, mode_btn_h)
+            cr.fill()
+            cr.set_source_rgb(1.0, 1.0, 1.0)
+            cr.move_to(drop_btn_x + 16, held_y + 26)
+            cr.show_text("DROP")
+
+        # Close [X] Button (top right)
+        close_btn_w = 90
+        close_btn_h = 42
+        close_btn_x = margin_x + header_w - close_btn_w - 8
+        close_btn_y = header_y + 8
+        self.container_action_btns.append((close_btn_x, close_btn_y, close_btn_w, close_btn_h, "CLOSE"))
+        cr.set_source_rgb(0.65, 0.18, 0.18)
+        cr.rectangle(close_btn_x, close_btn_y, close_btn_w, close_btn_h)
+        cr.fill()
+        cr.set_source_rgb(1.0, 1.0, 1.0)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(16)
+        ext = cr.text_extents("CLOSE [X]")
+        cr.move_to(close_btn_x + (close_btn_w - ext.width) / 2.0, close_btn_y + 26)
+        cr.show_text("CLOSE [X]")
+
+        # 2. Container Slots Layout
+        player_start = container.get("playerStart", 9)
+        hotbar_start = container.get("hotbarStart", 36)
+        total_slots = len(slots)
+
+        cell_size = 56
+        cell_pitch = 60
+        player_w = 9 * cell_pitch
+        player_x = (W - player_w) / 2.0
+
+        # Draw container slots (if external container like chest, furnace, crafting)
+        if player_start > 0:
+            c_slots = slots[:player_start]
+            c_cols = min(9, len(c_slots))
+            c_rows = int(math.ceil(len(c_slots) / float(c_cols))) if c_cols > 0 else 0
+            c_w = c_cols * cell_pitch
+            c_x = (W - c_w) / 2.0
+            c_y = 100
+
+            # Container region box
+            cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
+            cr.rectangle(c_x - 12, c_y - 12, c_w + 24, (c_rows * cell_pitch) + 24)
+            cr.fill()
+
+            for i, slot in enumerate(c_slots):
+                col = i % c_cols
+                row = i // c_cols
+                sx = c_x + col * cell_pitch
+                sy = c_y + row * cell_pitch
+                self.draw_container_slot(cr, sx, sy, cell_size, slot, i)
+
+            player_y = c_y + (c_rows * cell_pitch) + 36
+        else:
+            # Player inventory only: Draw armor and crafting block
+            player_y = 440
+            self.draw_player_equipment_block(cr, player_x, 110, cell_size, cell_pitch, slots)
+
+        # Draw Player 3x9 Main Inventory
+        cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
+        cr.rectangle(player_x - 12, player_y - 12, player_w + 24, (4 * cell_pitch) + 36)
+        cr.fill()
+
+        # Label
+        cr.set_source_rgb(0.7, 0.75, 0.85)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(15)
+        cr.move_to(player_x, player_y - 18)
+        cr.show_text("INVENTORY")
+
+        main_count = hotbar_start - player_start
+        for i in range(main_count):
+            slot_idx = player_start + i
+            if slot_idx >= total_slots:
+                break
+            slot = slots[slot_idx]
+            col = i % 9
+            row = i // 9
+            sx = player_x + col * cell_pitch
+            sy = player_y + row * cell_pitch
+            self.draw_container_slot(cr, sx, sy, cell_size, slot, slot_idx)
+
+        # Draw 1x9 Hotbar (with small separation)
+        hotbar_y = player_y + (3 * cell_pitch) + 12
+        cr.set_source_rgb(0.7, 0.75, 0.85)
+        cr.set_font_size(15)
+        cr.move_to(player_x, hotbar_y - 18)
+        cr.show_text("HOTBAR")
+
+        hotbar_count = min(9, total_slots - hotbar_start)
+        for i in range(hotbar_count):
+            slot_idx = hotbar_start + i
+            slot = slots[slot_idx]
+            sx = player_x + i * cell_pitch
+            sy = hotbar_y
+            self.draw_container_slot(cr, sx, sy, cell_size, slot, slot_idx)
+
+    def draw_player_equipment_block(self, cr, player_x, eq_y, cell_size, cell_pitch, slots):
+        # Armor slots: 4 vertical slots on the left
+        # Crafting grid: 2x2 + result on the right
+        cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
+        cr.rectangle(player_x - 12, eq_y - 12, (9 * cell_pitch) + 24, (4 * cell_pitch) + 16)
+        cr.fill()
+
+        cr.set_source_rgb(0.7, 0.75, 0.85)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(15)
+        cr.move_to(player_x, eq_y - 18)
+        cr.show_text("ARMOR & CRAFTING")
+
+        armor_indices = [5, 6, 7, 8]  # Helmet, Chest, Legs, Boots
+        for i, a_idx in enumerate(armor_indices):
+            if a_idx < len(slots):
+                sx = player_x + 40
+                sy = eq_y + i * cell_pitch
+                self.draw_container_slot(cr, sx, sy, cell_size, slots[a_idx], a_idx)
+
+        # Offhand slot (slot 45)
+        if len(slots) > 45:
+            off_x = player_x + 40 + cell_pitch + 16
+            off_y = eq_y + 3 * cell_pitch
+            self.draw_container_slot(cr, off_x, off_y, cell_size, slots[45], 45)
+            cr.set_source_rgb(0.6, 0.65, 0.75)
+            cr.set_font_size(12)
+            cr.move_to(off_x, off_y - 6)
+            cr.show_text("OFFHAND")
+
+        # 2x2 Crafting Grid (slots 1, 2, 3, 4) & Result (slot 0)
+        craft_x = player_x + 360
+        craft_y = eq_y + 30
+        craft_indices = [[1, 2], [3, 4]]
+        for r in range(2):
+            for c in range(2):
+                c_idx = craft_indices[r][c]
+                if c_idx < len(slots):
+                    sx = craft_x + c * cell_pitch
+                    sy = craft_y + r * cell_pitch
+                    self.draw_container_slot(cr, sx, sy, cell_size, slots[c_idx], c_idx)
+
+        # Arrow pointing to result
+        cr.set_source_rgb(0.6, 0.65, 0.75)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(24)
+        cr.move_to(craft_x + 2 * cell_pitch + 20, craft_y + cell_pitch)
+        cr.show_text("->")
+
+        # Crafting Result (slot 0)
+        if len(slots) > 0:
+            res_x = craft_x + 2 * cell_pitch + 70
+            res_y = craft_y + 25
+            self.draw_container_slot(cr, res_x, res_y, cell_size + 8, slots[0], 0)
+
+    def draw_container_slot(self, cr, sx, sy, size, slot_data, slot_idx):
+        self.container_slot_rects.append((sx, sy, size, size, slot_idx))
+
+        # Minecraft slot bevel box
+        cr.set_source_rgb(0.22, 0.22, 0.22)
+        cr.rectangle(sx, sy, size, size)
+        cr.fill()
+
+        # Top/Left shadow
+        cr.set_source_rgb(0.14, 0.14, 0.14)
+        cr.rectangle(sx, sy, size, 3)
+        cr.fill()
+        cr.rectangle(sx, sy, 3, size)
+        cr.fill()
+
+        # Bottom/Right highlight
+        cr.set_source_rgb(0.35, 0.35, 0.35)
+        cr.rectangle(sx, sy + size - 3, size, 3)
+        cr.fill()
+        cr.rectangle(sx + size - 3, sy, 3, size)
+        cr.fill()
+
+        # Draw Item if present
+        stack = slot_data.get("stack", {})
+        item_id = stack.get("itemId", "minecraft:air")
+        count = stack.get("count", 0)
+        damage = stack.get("damage", 0)
+        max_damage = stack.get("maxDamage", 0)
+
+        if item_id != "minecraft:air":
+            inner_pad = 6
+            item_draw_size = size - (inner_pad * 2)
+            ix = sx + inner_pad
+            iy = sy + inner_pad
+
+            if item_id in self.icon_cache:
+                surf = self.icon_cache[item_id]
+                draw_sprite(cr, surf, 0, 0, surf.get_width(), surf.get_height(),
+                            ix, iy, float(item_draw_size) / surf.get_width())
+            else:
+                short_name = item_id.split(":")[-1].replace("_", " ")[:6]
+                cr.set_source_rgb(0.85, 0.85, 0.85)
+                cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+                cr.set_font_size(11)
+                cr.move_to(ix + 2, iy + item_draw_size / 2)
+                cr.show_text(short_name)
+
+            # Stack count numeral
+            if count > 1:
+                count_str = str(count)
+                cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+                cr.set_font_size(16)
+                ext = cr.text_extents(count_str)
+                tx = sx + size - ext.width - 4
+                ty = sy + size - 4
+                # Shadow
+                cr.set_source_rgb(0.0, 0.0, 0.0)
+                cr.move_to(tx + 2, ty + 2)
+                cr.show_text(count_str)
+                # White numeral
+                cr.set_source_rgb(1.0, 1.0, 1.0)
+                cr.move_to(tx, ty)
+                cr.show_text(count_str)
+
+            # Durability bar
+            if max_damage > 0:
+                dur = max(0.0, min(1.0, 1.0 - (damage / float(max_damage))))
+                bar_w = size - 14
+                bar_h = 4
+                bx = sx + 7
+                by = sy + size - 8
+                cr.set_source_rgb(0.0, 0.0, 0.0)
+                cr.rectangle(bx, by, bar_w, bar_h)
+                cr.fill()
+                cr.set_source_rgb(1.0 - dur, dur, 0.1)
+                cr.rectangle(bx, by, bar_w * dur, bar_h)
+                cr.fill()
+
+    # -------------------------------------------------------------------------
+    # ROAMING SCREEN RENDERING
+    # -------------------------------------------------------------------------
+    def draw_roaming_screen(self, cr, W, H):
+        # 1. Header with Status & Coordinates
         self.draw_header(cr, W, H)
 
+        # 2. Live Minimap Display
+        self.draw_minimap(cr, W, H)
+
         # 3. GUI Layout Scaling & Centering
-        # Standard Minecraft hotbar is 182 px wide. Scale factor 4.0 gives 728 px width.
         scale = 4.0
         hotbar_w = 182 * scale
         hotbar_h = 22 * scale
         center_x = (W - hotbar_w) / 2.0
 
-        # Anchor HUD stack comfortably in the center-to-lower portion
-        hotbar_y = H * 0.52
+        # Anchor HUD stack
+        hotbar_y = 660
         xp_y = hotbar_y - (5 * scale) - 14
         vitals_y = xp_y - (9 * scale) - 16
 
-        # Draw Vitals: Armor, Hearts, Hunger, XP, Air
+        # Draw Vitals & Hotbar
         self.draw_vitals(cr, center_x, vitals_y, xp_y, scale)
-
-        # Draw Hotbar & Items
         self.draw_hotbar(cr, center_x, hotbar_y, scale)
 
-        # Draw Quick Action buttons
+        # Draw Quick Actions
         self.draw_quick_actions(cr, W, H)
+
+    def draw_minimap(self, cr, W, H):
+        map_tile = self.map_tile
+        sheet_size = 440
+        sheet_x = (W - sheet_size) / 2.0
+        sheet_y = 90
+        border = 20
+        tile_draw_size = sheet_size - 2 * border
+
+        # Paper Parchment Background
+        if self.map_bg_surface:
+            surf = self.map_bg_surface
+            draw_sprite(cr, surf, 0, 0, surf.get_width(), surf.get_height(),
+                        sheet_x, sheet_y, float(sheet_size) / surf.get_width())
+        else:
+            cr.set_source_rgb(0.84, 0.75, 0.59)  # Vanilla map paper beige
+            cr.rectangle(sheet_x, sheet_y, sheet_size, sheet_size)
+            cr.fill()
+            cr.set_source_rgb(0.45, 0.38, 0.28)
+            cr.set_line_width(4.0)
+            cr.rectangle(sheet_x, sheet_y, sheet_size, sheet_size)
+            cr.stroke()
+
+        if not map_tile or not map_tile.get("surface"):
+            cr.set_source_rgb(0.35, 0.32, 0.25)
+            cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+            cr.set_font_size(18)
+            msg = "JOIN WORLD TO ACTIVATE MINEMAP" if self.connected else "MINEMAP WAITING FOR GAME"
+            ext = cr.text_extents(msg)
+            cr.move_to(sheet_x + (sheet_size - ext.width) / 2.0, sheet_y + sheet_size / 2.0)
+            cr.show_text(msg)
+            return
+
+        # Draw 128x128 map tile with nearest-neighbor scaling
+        tile_surf = map_tile["surface"]
+        tile_scale = float(tile_draw_size) / map_tile["size"]
+        draw_sprite(cr, tile_surf, 0, 0, map_tile["size"], map_tile["size"],
+                    sheet_x + border, sheet_y + border, tile_scale)
+
+        # Player Marker
+        # Marker center relative to tile
+        origin_x = map_tile.get("originX", 0)
+        origin_z = map_tile.get("originZ", 0)
+        player_x = map_tile.get("playerX", 0.0)
+        player_z = map_tile.get("playerZ", 0.0)
+        yaw = map_tile.get("yaw", 0.0)
+
+        marker_px = (player_x - origin_x) * tile_scale
+        marker_pz = (player_z - origin_z) * tile_scale
+        mx = sheet_x + border + marker_px
+        my = sheet_y + border + marker_pz
+
+        # Draw player orientation arrowhead
+        cr.save()
+        cr.translate(mx, my)
+        # Minecraft yaw: 0 = South, +90 = West, 180 = North, 270 = East. Arrow points up (-Z).
+        cr.rotate(math.radians(yaw + 180.0))
+
+        r = 12.0
+        cr.move_to(0, -r)
+        cr.line_to(r * 0.65, r * 0.75)
+        cr.line_to(0, r * 0.35)
+        cr.line_to(-r * 0.65, r * 0.75)
+        cr.close_path()
+
+        # Black outline
+        cr.set_source_rgb(0.0, 0.0, 0.0)
+        cr.set_line_width(4.0)
+        cr.stroke_preserve()
+        # White fill
+        cr.set_source_rgb(1.0, 1.0, 1.0)
+        cr.fill()
+        cr.restore()
+
+        # Coordinates label under the map
+        coord_str = f"X: {player_x:.1f}   Z: {player_z:.1f}"
+        cr.set_source_rgb(0.9, 0.95, 1.0)
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(15)
+        ext = cr.text_extents(coord_str)
+        cr.move_to(sheet_x + (sheet_size - ext.width) / 2.0, sheet_y + sheet_size + 24)
+        cr.show_text(coord_str)
 
     def draw_header(self, cr, W, H):
         header_h = 56
@@ -376,32 +868,31 @@ class ThorMcHud(Gtk.Window):
         header_w = W - 2 * margin_x
 
         cr.set_source_rgba(0.12, 0.14, 0.18, 0.9)
-        cr.rectangle(margin_x, 24, header_w, header_h)
+        cr.rectangle(margin_x, 20, header_w, header_h)
         cr.fill()
 
         cr.set_source_rgba(0.24, 0.28, 0.36, 1.0)
         cr.set_line_width(2.0)
-        cr.rectangle(margin_x, 24, header_w, header_h)
+        cr.rectangle(margin_x, 20, header_w, header_h)
         cr.stroke()
 
         cr.set_source_rgb(0.92, 0.94, 0.98)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(20)
-        cr.move_to(margin_x + 24, 58)
+        cr.move_to(margin_x + 24, 54)
         cr.show_text("THOR MINECRAFT COMPANION")
 
-        # Connection status indicator
         status_text = "CONNECTED" if self.connected else ("DEMO MODE" if self.demo_mode else "WAITING FOR GAME")
         dot_color = (0.2, 0.9, 0.3) if self.connected else ((0.3, 0.7, 1.0) if self.demo_mode else (1.0, 0.4, 0.2))
 
         dot_x = margin_x + header_w - 240
         cr.set_source_rgb(*dot_color)
-        cr.arc(dot_x, 52, 7, 0, 2 * math.pi)
+        cr.arc(dot_x, 48, 7, 0, 2 * math.pi)
         cr.fill()
 
         cr.set_source_rgb(0.75, 0.82, 0.9)
         cr.set_font_size(15)
-        cr.move_to(dot_x + 20, 58)
+        cr.move_to(dot_x + 20, 54)
         cr.show_text(status_text)
 
     def draw_vitals(self, cr, hotbar_x, vitals_y, xp_y, scale):
@@ -411,15 +902,12 @@ class ThorMcHud(Gtk.Window):
         # --- Experience Bar ---
         xp_h = 5 * scale
         if icons:
-            # Background
             draw_sprite(cr, icons, 0, 64, 182, 5, hotbar_x, xp_y, scale)
-            # Fill
             prog = max(0.0, min(1.0, self.state.xp_progress))
             prog_w = int(182 * prog)
             if prog_w > 0:
                 draw_sprite(cr, icons, 0, 69, prog_w, 5, hotbar_x, xp_y, scale)
         else:
-            # Vector fallback
             cr.set_source_rgb(0.1, 0.15, 0.1)
             cr.rectangle(hotbar_x, xp_y, hotbar_w, xp_h)
             cr.fill()
@@ -436,19 +924,15 @@ class ThorMcHud(Gtk.Window):
             ext = cr.text_extents(num_str)
             tx = hotbar_x + (hotbar_w - ext.width) / 2.0
             ty = xp_y - 8
-
-            # Shadow
             cr.set_source_rgb(0.0, 0.0, 0.0)
             for ox, oy in [(-2, 0), (2, 0), (0, -2), (0, 2), (2, 2)]:
                 cr.move_to(tx + ox, ty + oy)
                 cr.show_text(num_str)
-
-            # Green text
             cr.set_source_rgb(0.5, 1.0, 0.15)
             cr.move_to(tx, ty)
             cr.show_text(num_str)
 
-        # --- Hearts Row (Left aligned with XP bar) ---
+        # --- Hearts Row ---
         hearts_x = hotbar_x
         health = self.state.health
         step = 8 * scale
@@ -459,9 +943,7 @@ class ThorMcHud(Gtk.Window):
             val = health - (i * 2)
 
             if icons:
-                # Container
                 draw_sprite(cr, icons, 16, 0, 9, 9, hx, hy, scale)
-                # Heart Fill
                 if self.state.withered:
                     sx = 124 if val >= 2 else 133
                 elif self.state.poisoned:
@@ -481,7 +963,7 @@ class ThorMcHud(Gtk.Window):
                     cr.arc(hx + 4 * scale, hy + 4 * scale, 3 * scale, 0, 2 * math.pi)
                     cr.fill()
 
-        # Absorption Hearts (if any, stacked above hearts)
+        # Absorption Hearts
         if self.state.absorption > 0:
             for i in range(10):
                 hx = hearts_x + i * step
@@ -492,7 +974,7 @@ class ThorMcHud(Gtk.Window):
                     abs_sx = 160 if val >= 2 else 169
                     draw_sprite(cr, icons, abs_sx, 0, 9, 9, hx, hy, scale)
 
-        # Armor Row (stacked above hearts / absorption)
+        # Armor Row
         armor_pts = self.state.armor
         if armor_pts > 0:
             armor_y = vitals_y - (10 * scale) if self.state.absorption <= 0 else vitals_y - (20 * scale)
@@ -507,7 +989,7 @@ class ThorMcHud(Gtk.Window):
                     elif armor_pts > 0:
                         draw_sprite(cr, icons, 16, 9, 9, 9, ax, armor_y, scale)
 
-        # --- Hunger / Food Row (Right aligned with XP bar) ---
+        # --- Hunger / Food Row ---
         food_right = hotbar_x + hotbar_w
         food_pts = self.state.food
 
@@ -517,9 +999,7 @@ class ThorMcHud(Gtk.Window):
             val = food_pts - (i * 2)
 
             if icons:
-                # Container
                 draw_sprite(cr, icons, 16, 27, 9, 9, fx, fy, scale)
-                # Fill
                 if val >= 2:
                     draw_sprite(cr, icons, 52, 27, 9, 9, fx, fy, scale)
                 elif val == 1:
@@ -533,7 +1013,7 @@ class ThorMcHud(Gtk.Window):
                     cr.arc(fx + 4 * scale, fy + 4 * scale, 3 * scale, 0, 2 * math.pi)
                     cr.fill()
 
-        # Air Bubbles (above hunger when submerged)
+        # Air Bubbles
         if self.state.air < 300 and icons:
             air_y = vitals_y - (10 * scale)
             num_bubbles = max(0, min(10, int(math.ceil(self.state.air / 30.0))))
@@ -544,7 +1024,7 @@ class ThorMcHud(Gtk.Window):
     def draw_hotbar(self, cr, hotbar_x, hotbar_y, scale):
         widgets = self.widgets_surface
 
-        # 1. Hotbar Background Strip (182x22)
+        # Hotbar Background Strip
         if widgets:
             draw_sprite(cr, widgets, 0, 0, 182, 22, hotbar_x, hotbar_y, scale)
         else:
@@ -552,7 +1032,7 @@ class ThorMcHud(Gtk.Window):
             cr.rectangle(hotbar_x, hotbar_y, 182 * scale, 22 * scale)
             cr.fill()
 
-        # 2. Selected Slot Indicator (24x24 box)
+        # Selected Slot Indicator
         sel_idx = max(0, min(8, self.state.selected_slot))
         sel_x = hotbar_x + (sel_idx * 20 - 1) * scale
         sel_y = hotbar_y - 1 * scale
@@ -564,7 +1044,7 @@ class ThorMcHud(Gtk.Window):
             cr.rectangle(sel_x, sel_y, 24 * scale, 24 * scale)
             cr.stroke()
 
-        # 3. Offhand slot (to the left of hotbar)
+        # Offhand slot
         offhand_x = hotbar_x - (29 * scale) - 20
         offhand_y = hotbar_y
         if widgets:
@@ -574,11 +1054,10 @@ class ThorMcHud(Gtk.Window):
                 draw_sprite(cr, surf, 0, 0, surf.get_width(), surf.get_height(),
                             offhand_x + 9 * scale, offhand_y + 4 * scale, (16 * scale) / surf.get_width())
 
-        # 4. Item Slots
+        # Item Slots
         self.slot_rects = []
         for i in range(9):
             slot = self.state.hotbar[i] if i < len(self.state.hotbar) else HotbarSlot()
-
             slot_hit_x = hotbar_x + (i * 20) * scale
             slot_hit_y = hotbar_y
             slot_hit_w = 20 * scale
@@ -589,14 +1068,12 @@ class ThorMcHud(Gtk.Window):
             item_y = hotbar_y + 3 * scale
             item_size = 16 * scale
 
-            # Draw item texture
             if slot.item_id != "minecraft:air":
                 if slot.item_id in self.icon_cache:
                     surf = self.icon_cache[slot.item_id]
                     draw_sprite(cr, surf, 0, 0, surf.get_width(), surf.get_height(),
                                 item_x, item_y, item_size / float(surf.get_width()))
                 else:
-                    # Item text label placeholder
                     short_name = slot.item_id.split(":")[-1].replace("_", " ")[:5]
                     cr.set_source_rgb(0.9, 0.9, 0.9)
                     cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
@@ -604,7 +1081,6 @@ class ThorMcHud(Gtk.Window):
                     cr.move_to(item_x + 4, item_y + item_size / 2)
                     cr.show_text(short_name)
 
-                # Stack count (bottom right)
                 if slot.count > 1:
                     count_str = str(slot.count)
                     cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
@@ -612,29 +1088,22 @@ class ThorMcHud(Gtk.Window):
                     ext = cr.text_extents(count_str)
                     tx = item_x + item_size - ext.width - 2
                     ty = item_y + item_size - 2
-
-                    # Shadow
                     cr.set_source_rgb(0.0, 0.0, 0.0)
                     cr.move_to(tx + 2, ty + 2)
                     cr.show_text(count_str)
-
-                    # White numeral
                     cr.set_source_rgb(1.0, 1.0, 1.0)
                     cr.move_to(tx, ty)
                     cr.show_text(count_str)
 
-                # Durability Bar
                 dur = slot.durability_fraction
                 if dur is not None:
                     bar_w = 13 * scale
                     bar_h = 2 * scale
                     bar_x = item_x + 1.5 * scale
                     bar_y = item_y + item_size - bar_h
-
                     cr.set_source_rgb(0.0, 0.0, 0.0)
                     cr.rectangle(bar_x, bar_y, bar_w, bar_h)
                     cr.fill()
-
                     r = (1.0 - dur) * 1.0
                     g = dur * 1.0
                     cr.set_source_rgb(r, g, 0.1)
@@ -656,7 +1125,7 @@ class ThorMcHud(Gtk.Window):
 
         total_w = len(btns) * btn_w + (len(btns) - 1) * btn_gap
         btn_x0 = (W - total_w) / 2.0
-        btn_y0 = H - 110
+        btn_y0 = H - 95
 
         self.action_btns = []
         for i, (label, cmd) in enumerate(btns):
@@ -664,26 +1133,22 @@ class ThorMcHud(Gtk.Window):
             by = btn_y0
             self.action_btns.append((bx, by, btn_w, btn_h, label, cmd))
 
-            # Minecraft-style button bevel
             cr.set_source_rgb(0.2, 0.22, 0.28)
             cr.rectangle(bx, by, btn_w, btn_h)
             cr.fill()
 
-            # Highlights
             cr.set_source_rgb(0.35, 0.38, 0.46)
             cr.rectangle(bx, by, btn_w, 3)
             cr.fill()
             cr.rectangle(bx, by, 3, btn_h)
             cr.fill()
 
-            # Shadows
             cr.set_source_rgb(0.1, 0.11, 0.14)
             cr.rectangle(bx, by + btn_h - 3, btn_w, 3)
             cr.fill()
             cr.rectangle(bx + btn_w - 3, by, 3, btn_h)
             cr.fill()
 
-            # Text
             cr.set_source_rgb(0.92, 0.94, 0.98)
             cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
             cr.set_font_size(16)
