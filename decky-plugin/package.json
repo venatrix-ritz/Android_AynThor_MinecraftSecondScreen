@@ -1,0 +1,8 @@
+{
+  "name": "thor-mc-hud",
+  "version": "1.0.0",
+  "description": "AYN Thor second-screen HUD companion loader & unloader for Decky",
+  "type": "module",
+  "author": "Ven",
+  "license": "MIT"
+}
