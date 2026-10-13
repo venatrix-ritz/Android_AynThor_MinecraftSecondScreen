@@ -24,7 +24,8 @@ import argparse
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gtk, Gdk, GLib, cairo
+from gi.repository import Gtk, Gdk, GLib
+import cairo
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 48291
