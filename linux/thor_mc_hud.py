@@ -806,7 +806,7 @@ class ThorMcHud(Gtk.Window):
             cr.set_source_rgb(0.35, 0.32, 0.25)
             cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
             cr.set_font_size(18)
-            msg = "JOIN WORLD TO ACTIVATE MINEMAP" if self.connected else "MINEMAP WAITING FOR GAME"
+            msg = "JOIN WORLD TO ACTIVATE MINIMAP" if self.connected else "MINIMAP WAITING FOR GAME"
             ext = cr.text_extents(msg)
             cr.move_to(sheet_x + (sheet_size - ext.width) / 2.0, sheet_y + sheet_size / 2.0)
             cr.show_text(msg)
