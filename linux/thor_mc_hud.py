@@ -24,7 +24,8 @@ import argparse
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gtk, Gdk, GLib
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
 import cairo
 
 DEFAULT_HOST = "127.0.0.1"
@@ -214,7 +215,7 @@ class ThorMcHud(Gtk.Window):
             if item_id and data_b64:
                 try:
                     png_bytes = base64.b64decode(data_b64)
-                    loader = Gdk.PixbufLoader.new_with_type("png")
+                    loader = GdkPixbuf.PixbufLoader.new_with_type("png")
                     loader.write(png_bytes)
                     loader.close()
                     pixbuf = loader.get_pixbuf()
