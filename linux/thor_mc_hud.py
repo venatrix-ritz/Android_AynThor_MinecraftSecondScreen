@@ -91,6 +91,15 @@ CLIENT_JAR_SEARCH_PATHS = [
     "/var/home/armada/.minecraft/versions/*/*.jar",
 ]
 
+LSO_JAR_SEARCH_PATHS = [
+    os.path.expanduser("~/.local/share/thor-mc-hud/assets/lso_overlay.png"),
+    "assets/lso_overlay.png",
+    "/var/home/armada/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/DeceasedCraft - Urban Zombie Apocalypse/minecraft/mods/legendarysurvivaloverhaul-*.jar",
+    "/var/home/armada/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/*/minecraft/mods/legendarysurvivaloverhaul-*.jar",
+    "/var/home/armada/.local/share/PrismLauncher/instances/*/minecraft/mods/legendarysurvivaloverhaul-*.jar",
+    "X:/ATLauncher/instances/DeceasedCraftBeta/mods/legendarysurvivaloverhaul-*.jar",
+]
+
 def load_hotkeys():
     try:
         if os.path.exists(HOTKEYS_FILE):
@@ -212,6 +221,7 @@ class ThorMcHud(Gtk.Window):
         self.icons_surface = None
         self.widgets_surface = None
         self.map_bg_surface = None
+        self.lso_overlay_surface = None
         self.load_minecraft_textures()
 
         # GTK Drawing Area
@@ -269,6 +279,42 @@ class ThorMcHud(Gtk.Window):
             print(f"[ThorHud] Loaded textures from: {jar_path}")
         except Exception as e:
             print(f"[ThorHud] Error loading textures from jar: {e}")
+
+        # Locate LSO mod jar or pre-extracted overlay.png for thirst droplets
+        for p in LSO_JAR_SEARCH_PATHS:
+            expanded = os.path.expanduser(p)
+            if os.path.isfile(expanded) and expanded.endswith(".png"):
+                try:
+                    self.lso_overlay_surface = cairo.ImageSurface.create_from_png(expanded)
+                    print(f"[ThorHud] Loaded LSO overlay texture from: {expanded}")
+                    break
+                except Exception as e:
+                    print(f"[ThorHud] Error loading LSO overlay image {expanded}: {e}")
+            else:
+                matches = glob.glob(expanded)
+                if matches:
+                    lso_path = sorted(matches)[-1]
+                    if os.path.isfile(lso_path):
+                        if lso_path.endswith(".png"):
+                            try:
+                                self.lso_overlay_surface = cairo.ImageSurface.create_from_png(lso_path)
+                                print(f"[ThorHud] Loaded LSO overlay texture from: {lso_path}")
+                                break
+                            except Exception as e:
+                                print(f"[ThorHud] Error loading LSO overlay image {lso_path}: {e}")
+                        else:
+                            try:
+                                with zipfile.ZipFile(lso_path, 'r') as z:
+                                    for name in z.namelist():
+                                        if name.endswith("textures/gui/overlay.png"):
+                                            data = z.read(name)
+                                            self.lso_overlay_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
+                                            print(f"[ThorHud] Loaded LSO overlay texture from: {lso_path}")
+                                            break
+                                if self.lso_overlay_surface:
+                                    break
+                            except Exception as e:
+                                print(f"[ThorHud] Error extracting LSO overlay from {lso_path}: {e}")
 
     def tick_redraw(self):
         self.darea.queue_draw()
@@ -844,10 +890,14 @@ class ThorMcHud(Gtk.Window):
         cr.move_to(vx, vy + 28)
         cr.show_text(f"❤ HP: {self.state.health:.0f}/{self.state.max_health:.0f}")
 
-        # Food & Saturation
+        # Food & Saturation & Thirst
         cr.set_source_rgb(0.85, 0.55, 0.2)
         cr.move_to(vx + 165, vy + 28)
-        cr.show_text(f"🍗 FOOD: {self.state.food}/20  (SAT: {self.state.saturation:.1f})")
+        th_str = ""
+        if self.state.survival and self.state.survival.get("hasThirst"):
+            th = self.state.survival.get("thirst", 20.0)
+            th_str = f"  💧 {th:.0f}/20"
+        cr.show_text(f"🍗 FOOD: {self.state.food}/20  (SAT: {self.state.saturation:.1f}){th_str}")
 
         # Armor & Toughness
         cr.set_source_rgb(0.3, 0.7, 0.9)
@@ -1446,6 +1496,54 @@ class ThorMcHud(Gtk.Window):
                 cr.rectangle(bar_x, bar_y, bar_w * pct, bar_h)
                 cr.fill()
 
+    def draw_procedural_waterdrop(self, cr, tx, ty, scale, val, has_sat):
+        """Draws a vector water droplet when LSO overlay texture is not loaded."""
+        w = 9 * scale
+        h = 9 * scale
+        cx = tx + w / 2.0
+        cy = ty + h * 0.62
+        r = w * 0.38
+
+        def droplet_path():
+            cr.new_path()
+            cr.move_to(cx, ty + 1.0 * scale)
+            cr.curve_to(cx + r * 1.05, ty + h * 0.40, cx + r, cy + r * 0.90, cx, cy + r * 0.90)
+            cr.curve_to(cx - r, cy + r * 0.90, cx - r * 1.05, ty + h * 0.40, cx, ty + 1.0 * scale)
+            cr.close_path()
+
+        # 1. Background / container outline
+        cr.set_source_rgb(0.04, 0.18, 0.28)
+        droplet_path()
+        cr.fill()
+
+        # 2. Interior fill
+        if val >= 2:
+            cr.set_source_rgb(0.18, 0.65, 0.95)
+            cr.save()
+            droplet_path()
+            cr.clip()
+            cr.paint()
+            # Glint
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.6)
+            cr.arc(cx - r * 0.3, cy - r * 0.2, 1.2 * scale, 0, 2 * math.pi)
+            cr.fill()
+            cr.restore()
+        elif val == 1:
+            cr.save()
+            droplet_path()
+            cr.clip()
+            cr.rectangle(cx, ty, w / 2.0, h)
+            cr.set_source_rgb(0.18, 0.65, 0.95)
+            cr.fill()
+            cr.restore()
+
+        # 3. Saturation border highlight
+        if has_sat:
+            cr.set_source_rgba(0.2, 0.9, 1.0, 0.8)
+            cr.set_line_width(1.5)
+            droplet_path()
+            cr.stroke()
+
     def draw_vitals(self, cr, hotbar_x, vitals_y, xp_y, scale):
         icons = self.icons_surface
         hotbar_w = 182 * scale
@@ -1570,9 +1668,63 @@ class ThorMcHud(Gtk.Window):
                     cr.arc(fx + 4 * scale, fy + 4 * scale, 3 * scale, 0, 2 * math.pi)
                     cr.fill()
 
-        # Air Bubbles
+        # --- Legendary Survival Overhaul (LSO) Hydration / Thirst Row ---
+        # 10 water droplets appear directly above hunger meter at vitals_y - 10 * scale
+        surv = self.state.survival
+        has_thirst = bool(surv and surv.get("hasThirst"))
+        if has_thirst:
+            thirst_pts = float(surv.get("thirst", 20.0))
+            thirst_sat = float(surv.get("thirstSat", surv.get("thirstSaturation", 0.0)))
+            thirst_y = vitals_y - (10 * scale)
+
+            # Active effects determine droplet variant
+            has_thirst_eff = any("thirst" in e.get("id", "").lower() and "heat" not in e.get("id", "").lower() for e in self.state.effects)
+            has_heat_thirst = any("heat_thirst" in e.get("id", "").lower() for e in self.state.effects)
+
+            if has_thirst_eff and has_heat_thirst:
+                x_eff_base = 27
+                y_eff_base = 9
+                sat_eff_base = 126
+            elif has_thirst_eff:
+                x_eff_base = 27
+                y_eff_base = 0
+                sat_eff_base = 72
+            elif has_heat_thirst:
+                x_eff_base = 0
+                y_eff_base = 9
+                sat_eff_base = 72
+            else:
+                x_eff_base = 0
+                y_eff_base = 0
+                sat_eff_base = 54
+
+            lso_overlay = self.lso_overlay_surface
+
+            for i in range(10):
+                tx = food_right - (9 * scale) - i * step
+                ty = thirst_y
+                val = thirst_pts - (i * 2)
+
+                if lso_overlay:
+                    # 1. Background droplet container
+                    draw_sprite(cr, lso_overlay, x_eff_base, y_eff_base, 9, 9, tx, ty, scale)
+                    # 2. Filled droplet
+                    if val >= 2:
+                        draw_sprite(cr, lso_overlay, x_eff_base + 9, y_eff_base, 9, 9, tx, ty, scale)
+                    elif val == 1:
+                        draw_sprite(cr, lso_overlay, x_eff_base + 18, y_eff_base, 9, 9, tx, ty, scale)
+
+                    # 3. Saturation border (AppleSkin highlight for hydration)
+                    if thirst_sat > (i * 2):
+                        sat_val = thirst_sat - (i * 2)
+                        sat_x = sat_eff_base if sat_val >= 2 else (sat_eff_base + 9)
+                        draw_sprite(cr, lso_overlay, sat_x, 0, 9, 9, tx, ty, scale)
+                else:
+                    self.draw_procedural_waterdrop(cr, tx, ty, scale, val, thirst_sat > (i * 2))
+
+        # Air Bubbles (stack above thirst droplets if thirst is active)
         if self.state.air < 300 and icons:
-            air_y = vitals_y - (10 * scale)
+            air_y = vitals_y - (20 * scale) if has_thirst else vitals_y - (10 * scale)
             num_bubbles = max(0, min(10, int(math.ceil(self.state.air / 30.0))))
             for i in range(num_bubbles):
                 bx = food_right - (9 * scale) - i * step
@@ -1881,6 +2033,7 @@ class ThorMcHud(Gtk.Window):
         self.state.survival = {
             "hasThirst": True,
             "thirst": 17.5,
+            "thirstSat": 4.0,
             "thirstSaturation": 4.0,
             "hasTemp": True,
             "temperature": 37.0,
