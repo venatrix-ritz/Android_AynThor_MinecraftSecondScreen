@@ -754,8 +754,8 @@ class ThorMcHud(Gtk.Window):
         hotbar_start = container.get("hotbarStart", 36)
         total_slots = len(slots)
 
-        cell_size = 64
-        cell_pitch = 70
+        cell_size = 68
+        cell_pitch = 76
         player_w = 9 * cell_pitch
         player_x = (W - player_w) / 2.0
 
@@ -765,7 +765,7 @@ class ThorMcHud(Gtk.Window):
             c_rows = int(math.ceil(len(c_slots) / float(c_cols))) if c_cols > 0 else 0
             c_w = c_cols * cell_pitch
             c_x = (W - c_w) / 2.0
-            c_y = 136
+            c_y = 138
 
             cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
             cr.rectangle(c_x - 12, c_y - 10, c_w + 24, (c_rows * cell_pitch) + 20)
@@ -778,10 +778,10 @@ class ThorMcHud(Gtk.Window):
                 sy = c_y + row * cell_pitch
                 self.draw_container_slot(cr, sx, sy, cell_size, slot, i)
 
-            player_y = c_y + (c_rows * cell_pitch) + 28
+            player_y = c_y + (c_rows * cell_pitch) + 30
         else:
-            player_y = 390
-            self.draw_player_equipment_block(cr, player_x, 136, cell_size, cell_pitch, slots)
+            player_y = 410
+            self.draw_player_equipment_block(cr, player_x, 138, cell_size, cell_pitch, slots)
 
         # Player 3x9 Main Inventory
         cr.set_source_rgba(0.12, 0.13, 0.17, 0.85)
@@ -807,7 +807,7 @@ class ThorMcHud(Gtk.Window):
             self.draw_container_slot(cr, sx, sy, cell_size, slot, slot_idx)
 
         # 1x9 Hotbar
-        hotbar_y = player_y + (3 * cell_pitch) + 12
+        hotbar_y = player_y + (3 * cell_pitch) + 14
         cr.set_source_rgb(0.7, 0.75, 0.85)
         cr.set_font_size(14)
         cr.move_to(player_x, hotbar_y - 14)
@@ -822,7 +822,7 @@ class ThorMcHud(Gtk.Window):
             self.draw_container_slot(cr, sx, sy, cell_size, slot, slot_idx)
 
         # 4. Status & Vitals bar below container (lets player see health while looting)
-        vitals_bar_y = hotbar_y + cell_pitch + 16
+        vitals_bar_y = hotbar_y + cell_pitch + 18
         self.draw_mini_vitals_bar(cr, player_x, vitals_bar_y, player_w)
 
         # 5. Bottom Hotkeys Bar (with CLOSE [E] ready to exit container)
@@ -830,39 +830,39 @@ class ThorMcHud(Gtk.Window):
 
     def draw_mini_vitals_bar(self, cr, vx, vy, vw):
         cr.set_source_rgba(0.10, 0.12, 0.15, 0.9)
-        cr.rectangle(vx - 12, vy, vw + 24, 42)
+        cr.rectangle(vx - 12, vy, vw + 24, 46)
         cr.fill()
         cr.set_source_rgba(0.24, 0.28, 0.36, 0.8)
         cr.set_line_width(1.5)
-        cr.rectangle(vx - 12, vy, vw + 24, 42)
+        cr.rectangle(vx - 12, vy, vw + 24, 46)
         cr.stroke()
 
         # Health
         cr.set_source_rgb(0.9, 0.2, 0.25)
         cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
         cr.set_font_size(14)
-        cr.move_to(vx, vy + 26)
+        cr.move_to(vx, vy + 28)
         cr.show_text(f"❤ HP: {self.state.health:.0f}/{self.state.max_health:.0f}")
 
         # Food & Saturation
         cr.set_source_rgb(0.85, 0.55, 0.2)
-        cr.move_to(vx + 160, vy + 26)
+        cr.move_to(vx + 165, vy + 28)
         cr.show_text(f"🍗 FOOD: {self.state.food}/20  (SAT: {self.state.saturation:.1f})")
 
         # Armor & Toughness
         cr.set_source_rgb(0.3, 0.7, 0.9)
-        cr.move_to(vx + 390, vy + 26)
+        cr.move_to(vx + 395, vy + 28)
         cr.show_text(f"🛡 ARMOR: {self.state.armor}  (TOUGH: {self.state.armor_toughness:.0f})")
 
         # Gun Ammo or XP
         if self.state.gun and self.state.gun.get("active"):
             g = self.state.gun
             cr.set_source_rgb(1.0, 0.8, 0.2)
-            cr.move_to(vx + 560, vy + 26)
-            cr.show_text(f"🔫 {g.get('gunName', 'GUN')}: {g.get('ammo')}/{g.get('maxAmmo')} ({g.get('fireMode')})")
+            cr.move_to(vx + 550, vy + 28)
+            cr.show_text(f"🔫 {g.get('gunName', 'GUN')}: {g.get('ammo')}/{g.get('maxAmmo')}")
         else:
             cr.set_source_rgb(0.4, 0.9, 0.3)
-            cr.move_to(vx + 560, vy + 26)
+            cr.move_to(vx + 550, vy + 28)
             cr.show_text(f"⭐ LEVEL: {self.state.xp_level}")
 
     def draw_player_equipment_block(self, cr, player_x, eq_y, cell_size, cell_pitch, slots):
@@ -1014,13 +1014,13 @@ class ThorMcHud(Gtk.Window):
         self.draw_right_sidebar_mods(cr, W, H)
 
         # 5. Centered Vitals, XP & Hotbar
-        scale = 4.2
+        scale = 4.3
         hotbar_w = 182 * scale
         center_x = (W - hotbar_w) / 2.0
 
-        hotbar_y = 778
-        xp_y = hotbar_y - (5 * scale) - 14
-        vitals_y = xp_y - (9 * scale) - 20
+        hotbar_y = 860
+        xp_y = hotbar_y - (5 * scale) - 16
+        vitals_y = xp_y - (9 * scale) - 22
 
         self.draw_vitals(cr, center_x, vitals_y, xp_y, scale)
         self.draw_hotbar(cr, center_x, hotbar_y, scale)
@@ -1669,8 +1669,8 @@ class ThorMcHud(Gtk.Window):
 
     def draw_quick_actions(self, cr, W, H, in_container=False):
         btn_w = 175
-        btn_h = 74
-        btn_gap = 20
+        btn_h = 70
+        btn_gap = 18
 
         # Build list of 6 hotkeys from user configuration
         btns = []
@@ -1684,7 +1684,7 @@ class ThorMcHud(Gtk.Window):
 
         total_w = len(btns) * btn_w + (len(btns) - 1) * btn_gap
         btn_x0 = (W - total_w) / 2.0
-        btn_y0 = H - 150
+        btn_y0 = H - btn_h - 10
 
         for i, (label, cmd) in enumerate(btns):
             bx = btn_x0 + i * (btn_w + btn_gap)
