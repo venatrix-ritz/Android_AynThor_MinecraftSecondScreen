@@ -467,6 +467,15 @@ class ThorMcHud(Gtk.Window):
         return True
 
     def handle_pointer_interaction(self, x, y, button=1):
+        # Debounce duplicate touch / synthesized button events
+        now = time.time()
+        if hasattr(self, "_last_interaction_time") and hasattr(self, "_last_interaction_pos"):
+            lx, ly = self._last_interaction_pos
+            if (now - self._last_interaction_time < 0.12) and abs(x - lx) < 10 and abs(y - ly) < 10:
+                return
+        self._last_interaction_time = now
+        self._last_interaction_pos = (x, y)
+
         # 0. Hotkey Settings Modal Interaction (Intercepts all clicks when open)
         if self.settings_open:
             for bx, by, bw, bh, cmd, val in self.settings_action_btns:
@@ -491,7 +500,7 @@ class ThorMcHud(Gtk.Window):
             return
 
         # Check Hotkeys Settings Button in Header (present in both Roaming and Container)
-        for bx, by, bw, bh, cmd in self.action_btns:
+        for bx, by, bw, bh, label, cmd in self.action_btns:
             if cmd == "OPEN_SETTINGS" and bx <= x <= bx + bw and by <= y <= by + bh:
                 self.settings_open = True
                 return
@@ -585,6 +594,7 @@ class ThorMcHud(Gtk.Window):
     def draw_container_screen(self, cr, W, H):
         self.container_slot_rects = []
         self.container_action_btns = []
+        self.action_btns = []
 
         container = self.current_container or {}
         sync_id = container.get("syncId", 0)
@@ -987,6 +997,9 @@ class ThorMcHud(Gtk.Window):
     # ROAMING SCREEN RENDERING (Proportionally filled 1240x1080)
     # -------------------------------------------------------------------------
     def draw_roaming_screen(self, cr, W, H):
+        self.action_btns = []
+        self.slot_rects = []
+
         # 1. Header with Status & Settings
         self.draw_header(cr, W, H)
 
@@ -1673,7 +1686,6 @@ class ThorMcHud(Gtk.Window):
         btn_x0 = (W - total_w) / 2.0
         btn_y0 = H - 150
 
-        self.action_btns = []
         for i, (label, cmd) in enumerate(btns):
             bx = btn_x0 + i * (btn_w + btn_gap)
             by = btn_y0
