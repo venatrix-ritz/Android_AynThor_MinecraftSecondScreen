@@ -27,6 +27,7 @@ Features:
    - Bottom hotkeys bar with [CLOSE [E]] to seamlessly close containers
 """
 
+import codecs
 import os
 import sys
 import glob
@@ -363,6 +364,7 @@ class ThorMcHud(Gtk.Window):
 
     def network_loop(self):
         while self.running:
+            s = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(2.0)
@@ -374,6 +376,8 @@ class ThorMcHud(Gtk.Window):
                     self.icon_requests.reset()
                 print(f"[ThorHud] Connected to {self.host}:{self.port}")
 
+                # An incremental decoder keeps a multi-byte UTF-8 character that straddles two recv() chunks.
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                 recv_buf = ""
                 while self.running:
                     # Flush outgoing queue
@@ -389,18 +393,32 @@ class ThorMcHud(Gtk.Window):
                         chunk = s.recv(16384)
                         if not chunk:
                             break
-                        recv_buf += chunk.decode("utf-8", errors="replace")
-                        while "\n" in recv_buf:
-                            line, recv_buf = recv_buf.split("\n", 1)
-                            line = line.strip()
+                        recv_buf += decoder.decode(chunk)
+                        # Scan by index: splitting off the head each time copies the rest of the buffer per line.
+                        start = 0
+                        while True:
+                            nl = recv_buf.find("\n", start)
+                            if nl < 0:
+                                break
+                            line = recv_buf[start:nl].strip()
+                            start = nl + 1
                             if line:
                                 self.parse_incoming_line(line)
+                        recv_buf = recv_buf[start:]
 
-            except Exception as e:
+            except Exception:
+                pass
+            finally:
+                # Every exit path (error, server close, shutdown) drops the socket, so the next loop starts clean.
                 with self.lock:
                     self.connected = False
                     self.sock = None
                     self.icon_requests.reset()
+                if s is not None:
+                    s.close()
+            # After cleanup, so the HUD does not report "connected" through the back-off. Also covers a clean server close,
+            # which used to reconnect in a tight loop.
+            if self.running:
                 time.sleep(RECONNECT_INTERVAL)
 
     def request_icon(self, item_id):
