@@ -455,9 +455,11 @@ class ThorMcHud(Gtk.Window):
 
         # 3. Player left world
         if msg_type == "noplayer":
+            # Drop the last player snapshot too, or the HUD keeps drawing a frozen game.
             with self.lock:
                 self.current_container = None
                 self.map_tile = None
+                self.state = HudState()
             return
 
         # 4. Item icon response
