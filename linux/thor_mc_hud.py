@@ -119,6 +119,43 @@ def save_hotkeys(hotkeys):
     except Exception as e:
         print(f"[ThorHud] Error saving hotkeys: {e}")
 
+class IconRequests:
+    def __init__(self, pending_timeout=5.0, failure_backoff=5.0, clock=time.monotonic):
+        self._pending_timeout = pending_timeout
+        self._failure_backoff = failure_backoff
+        self._clock = clock
+        self._pending = {}  # item_id -> time the request was sent
+        self._failed = {}   # item_id -> time the mod said it had no icon
+
+    def should_request(self, item_id):
+        """True if an ICON request for item_id should be sent now. Marks it pending."""
+        now = self._clock()
+        failed_at = self._failed.get(item_id)
+        if failed_at is not None:
+            if now - failed_at < self._failure_backoff:
+                return False
+            del self._failed[item_id]
+        sent_at = self._pending.get(item_id)
+        if sent_at is not None and now - sent_at < self._pending_timeout:
+            return False
+        self._pending[item_id] = now
+        return True
+
+    def answered(self, item_id):
+        """The mod sent icon data for item_id."""
+        self._pending.pop(item_id, None)
+        self._failed.pop(item_id, None)
+
+    def failed(self, item_id):
+        """The mod replied with no icon data for item_id."""
+        self._pending.pop(item_id, None)
+        self._failed[item_id] = self._clock()
+
+    def reset(self):
+        """Forget everything, e.g. after a reconnect, so requests go out again."""
+        self._pending.clear()
+        self._failed.clear()
+
 class HotbarSlot:
     def __init__(self, item_id="minecraft:air", count=0, damage=0, max_damage=0, has_glint=False):
         self.item_id = item_id
@@ -196,7 +233,7 @@ class ThorMcHud(Gtk.Window):
         self.sock = None
         self.state = HudState()
         self.icon_cache = {}  # item_id -> cairo.ImageSurface
-        self.requested_icons = set()
+        self.icon_requests = IconRequests()
         self.lock = threading.Lock()
         self.send_queue = []
 
@@ -333,6 +370,8 @@ class ThorMcHud(Gtk.Window):
                 s.setblocking(False)
                 self.sock = s
                 self.connected = True
+                with self.lock:
+                    self.icon_requests.reset()
                 print(f"[ThorHud] Connected to {self.host}:{self.port}")
 
                 recv_buf = ""
@@ -361,7 +400,15 @@ class ThorMcHud(Gtk.Window):
                 with self.lock:
                     self.connected = False
                     self.sock = None
+                    self.icon_requests.reset()
                 time.sleep(RECONNECT_INTERVAL)
+
+    def request_icon(self, item_id):
+        """Queue an ICON: request for item_id unless it is cached or already in flight. Call with self.lock held."""
+        if item_id == "minecraft:air" or item_id in self.icon_cache:
+            return
+        if self.icon_requests.should_request(item_id):
+            self.send_queue.append(f"ICON:{item_id}")
 
     def parse_incoming_line(self, line):
         try:
@@ -400,14 +447,10 @@ class ThorMcHud(Gtk.Window):
                 for s in msg.get("slots", []):
                     st = s.get("stack", {})
                     iid = st.get("itemId", "minecraft:air")
-                    if iid != "minecraft:air" and iid not in self.icon_cache and iid not in self.requested_icons:
-                        self.requested_icons.add(iid)
-                        self.send_queue.append(f"ICON:{iid}")
+                    self.request_icon(iid)
                 cur = msg.get("cursor", {})
                 cur_id = cur.get("itemId", "minecraft:air")
-                if cur_id != "minecraft:air" and cur_id not in self.icon_cache and cur_id not in self.requested_icons:
-                    self.requested_icons.add(cur_id)
-                    self.send_queue.append(f"ICON:{cur_id}")
+                self.request_icon(cur_id)
             return
 
         # 3. Player left world
@@ -425,10 +468,18 @@ class ThorMcHud(Gtk.Window):
                 try:
                     png_bytes = base64.b64decode(data_b64)
                     surface = cairo.ImageSurface.create_from_png(io.BytesIO(png_bytes))
-                    with self.lock:
-                        self.icon_cache[item_id] = surface
                 except Exception as ex:
                     print(f"Error decoding icon for {item_id}: {ex}")
+                    with self.lock:
+                        self.icon_requests.failed(item_id)
+                    return
+                with self.lock:
+                    self.icon_cache[item_id] = surface
+                    self.icon_requests.answered(item_id)
+            elif item_id:
+                # The mod has no icon for this item (IconFailure): back off, don't retry every snapshot.
+                with self.lock:
+                    self.icon_requests.failed(item_id)
             return
 
         # 5. Standard & Mod HudState snapshot
@@ -485,9 +536,7 @@ class ThorMcHud(Gtk.Window):
                         has_glint=bool(item.get("hasGlint", False)),
                     )
                     new_hotbar.append(slot)
-                    if slot.item_id != "minecraft:air" and slot.item_id not in self.icon_cache and slot.item_id not in self.requested_icons:
-                        self.requested_icons.add(slot.item_id)
-                        self.send_queue.append(f"ICON:{slot.item_id}")
+                    self.request_icon(slot.item_id)
                 self.state.hotbar = new_hotbar
 
             if "offhand" in msg and isinstance(msg["offhand"], dict):
@@ -499,9 +548,7 @@ class ThorMcHud(Gtk.Window):
                     max_damage=int(item.get("maxDamage", 0)),
                     has_glint=bool(item.get("hasGlint", False)),
                 )
-                if self.state.offhand.item_id != "minecraft:air" and self.state.offhand.item_id not in self.icon_cache and self.state.offhand.item_id not in self.requested_icons:
-                    self.requested_icons.add(self.state.offhand.item_id)
-                    self.send_queue.append(f"ICON:{self.state.offhand.item_id}")
+                self.request_icon(self.state.offhand.item_id)
 
     def on_touch_event(self, widget, event):
         if event.type == Gdk.EventType.TOUCH_BEGIN:
