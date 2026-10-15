@@ -297,25 +297,25 @@ class ThorMcHud(Gtk.Window):
                 break
 
         if not jar_path or not os.path.isfile(jar_path):
+            # Keep going: the LSO overlay below does not depend on the client jar.
             print(f"[ThorHud] Client jar not found. Using procedural fallback textures.")
-            return
+        else:
+            try:
+                with zipfile.ZipFile(jar_path, 'r') as z:
+                    for name in z.namelist():
+                        if name.endswith("textures/gui/icons.png"):
+                            data = z.read(name)
+                            self.icons_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
+                        elif name.endswith("textures/gui/widgets.png"):
+                            data = z.read(name)
+                            self.widgets_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
+                        elif name.endswith("textures/map/map_background.png"):
+                            data = z.read(name)
+                            self.map_bg_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
 
-        try:
-            with zipfile.ZipFile(jar_path, 'r') as z:
-                for name in z.namelist():
-                    if name.endswith("textures/gui/icons.png"):
-                        data = z.read(name)
-                        self.icons_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
-                    elif name.endswith("textures/gui/widgets.png"):
-                        data = z.read(name)
-                        self.widgets_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
-                    elif name.endswith("textures/map/map_background.png"):
-                        data = z.read(name)
-                        self.map_bg_surface = cairo.ImageSurface.create_from_png(io.BytesIO(data))
-
-            print(f"[ThorHud] Loaded textures from: {jar_path}")
-        except Exception as e:
-            print(f"[ThorHud] Error loading textures from jar: {e}")
+                print(f"[ThorHud] Loaded textures from: {jar_path}")
+            except Exception as e:
+                print(f"[ThorHud] Error loading textures from jar: {e}")
 
         # Locate LSO mod jar or pre-extracted overlay.png for thirst droplets
         for p in LSO_JAR_SEARCH_PATHS:
