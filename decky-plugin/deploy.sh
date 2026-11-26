@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-THOR_HOST="${1:-192.168.0.41}"
+THOR_HOST="${1:-192.168.50.41}"
 PLUGIN_DIR="/home/armada/homebrew/plugins/thor-mc-hud"
 
 echo "==> Deploying Minecraft HUD Decky Plugin to ${THOR_HOST}..."
